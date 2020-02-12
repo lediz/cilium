@@ -599,6 +599,11 @@ func (m *Map) DumpWithCallback(cb DumpCallback) error {
 			break
 		}
 	}
+	runtime.KeepAlive(bpfCurrentKey)
+	runtime.KeepAlive(bpfNextKey)
+	runtime.KeepAlive(nextKey)
+	runtime.KeepAlive(value)
+
 	return nil
 }
 
@@ -717,6 +722,11 @@ func (m *Map) DumpReliablyWithCallback(cb DumpCallback, stats *DumpStats) error 
 		// continue from the next key
 		copy(currentKey, nextKey)
 	}
+
+	runtime.KeepAlive(currentKey)
+	runtime.KeepAlive(value)
+	runtime.KeepAlive(bpfCurrentKey)
+	runtime.KeepAlive(bpfNextKey)
 
 	return nil
 }
