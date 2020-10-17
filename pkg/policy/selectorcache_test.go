@@ -23,6 +23,7 @@ import (
 	k8sConst "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/policy/api"
+	"github.com/cilium/cilium/pkg/testutils"
 
 	. "gopkg.in/check.v1"
 )
@@ -33,7 +34,7 @@ var _ = Suite(&SelectorCacheTestSuite{})
 
 type DummySelectorCacheUser struct{}
 
-func (d *DummySelectorCacheUser) IdentitySelectionUpdated(selector CachedSelector, selections, added, deleted []identity.NumericIdentity) {
+func (d *DummySelectorCacheUser) IdentitySelectionUpdated(selector CachedSelector, added, deleted []identity.NumericIdentity) {
 }
 
 type cachedSelectionUser struct {
@@ -105,10 +106,12 @@ func (csu *cachedSelectionUser) RemoveSelector(sel CachedSelector) {
 	csu.c.Assert(csu.notifications, Equals, notifications)
 }
 
-func (csu *cachedSelectionUser) IdentitySelectionUpdated(selector CachedSelector, selections, added, deleted []identity.NumericIdentity) {
+func (csu *cachedSelectionUser) IdentitySelectionUpdated(selector CachedSelector, added, deleted []identity.NumericIdentity) {
 	csu.notifications++
 	csu.adds += len(added)
 	csu.deletes += len(deleted)
+
+	selections := selector.GetSelections()
 
 	// Validate added & deleted against the selections
 	for _, add := range added {
@@ -129,7 +132,8 @@ func (ds *SelectorCacheTestSuite) TearDownTest(c *C) {
 }
 
 func (ds *SelectorCacheTestSuite) TestAddRemoveSelector(c *C) {
-	sc := NewSelectorCache(cache.IdentityCache{})
+	sc := testNewSelectorCache(cache.IdentityCache{})
+
 	// Add some identities to the identity cache
 	sc.UpdateIdentities(cache.IdentityCache{
 		1234: labels.Labels{"app": labels.NewLabel("app", "test", labels.LabelSourceK8s),
@@ -178,7 +182,8 @@ func (ds *SelectorCacheTestSuite) TestAddRemoveSelector(c *C) {
 }
 
 func (ds *SelectorCacheTestSuite) TestMultipleIdentitySelectors(c *C) {
-	sc := NewSelectorCache(cache.IdentityCache{})
+	sc := testNewSelectorCache(cache.IdentityCache{})
+
 	// Add some identities to the identity cache
 	sc.UpdateIdentities(cache.IdentityCache{
 		1234: labels.Labels{"app": labels.NewLabel("app", "test", labels.LabelSourceK8s)}.LabelArray(),
@@ -213,7 +218,8 @@ func (ds *SelectorCacheTestSuite) TestMultipleIdentitySelectors(c *C) {
 }
 
 func (ds *SelectorCacheTestSuite) TestIdentityUpdates(c *C) {
-	sc := NewSelectorCache(cache.IdentityCache{})
+	sc := testNewSelectorCache(cache.IdentityCache{})
+
 	// Add some identities to the identity cache
 	sc.UpdateIdentities(cache.IdentityCache{
 		1234: labels.Labels{"app": labels.NewLabel("app", "test", labels.LabelSourceK8s)}.LabelArray(),
@@ -273,8 +279,8 @@ func (ds *SelectorCacheTestSuite) TestIdentityUpdates(c *C) {
 }
 
 func (ds *SelectorCacheTestSuite) TestFQDNSelectorUpdates(c *C) {
-	sc := NewSelectorCache(cache.IdentityCache{})
-	sc.SetLocalIdentityNotifier(newDummyIdentityNotifier())
+	sc := testNewSelectorCache(cache.IdentityCache{})
+
 	// Add some identities to the identity cache
 	googleSel := api.FQDNSelector{MatchName: "google.com"}
 	ciliumSel := api.FQDNSelector{MatchName: "cilium.io"}
@@ -335,8 +341,8 @@ func (ds *SelectorCacheTestSuite) TestFQDNSelectorUpdates(c *C) {
 }
 
 func (ds *SelectorCacheTestSuite) TestRemoveIdentitiesFQDNSelectors(c *C) {
-	sc := NewSelectorCache(cache.IdentityCache{})
-	sc.SetLocalIdentityNotifier(newDummyIdentityNotifier())
+	sc := testNewSelectorCache(cache.IdentityCache{})
+
 	// Add some identities to the identity cache
 	googleSel := api.FQDNSelector{MatchName: "google.com"}
 	ciliumSel := api.FQDNSelector{MatchName: "cilium.io"}
@@ -383,7 +389,8 @@ func (ds *SelectorCacheTestSuite) TestRemoveIdentitiesFQDNSelectors(c *C) {
 }
 
 func (ds *SelectorCacheTestSuite) TestIdentityUpdatesMultipleUsers(c *C) {
-	sc := NewSelectorCache(cache.IdentityCache{})
+	sc := testNewSelectorCache(cache.IdentityCache{})
+
 	// Add some identities to the identity cache
 	sc.UpdateIdentities(cache.IdentityCache{
 		1234: labels.Labels{"app": labels.NewLabel("app", "test", labels.LabelSourceK8s)}.LabelArray(),
@@ -446,9 +453,11 @@ func (ds *SelectorCacheTestSuite) TestIdentityUpdatesMultipleUsers(c *C) {
 }
 
 func (ds *SelectorCacheTestSuite) TestIdentityNotifier(c *C) {
-	sc := NewSelectorCache(cache.IdentityCache{})
-	idNotifier := newDummyIdentityNotifier()
-	sc.SetLocalIdentityNotifier(idNotifier)
+	sc := testNewSelectorCache(cache.IdentityCache{})
+	idNotifier, ok := sc.localIdentityNotifier.(*testutils.DummyIdentityNotifier)
+	c.Assert(ok, Equals, true)
+	c.Assert(idNotifier, Not(IsNil))
+
 	// Add some identities to the identity cache
 	googleSel := api.FQDNSelector{MatchName: "google.com"}
 	ciliumSel := api.FQDNSelector{MatchName: "cilium.io"}
@@ -458,7 +467,7 @@ func (ds *SelectorCacheTestSuite) TestIdentityNotifier(c *C) {
 	c.Assert(idNotifier.IsRegistered(googleSel), Equals, false)
 
 	injectedIDs := []identity.NumericIdentity{1000, 1001, 1002}
-	idNotifier.injectIdentitiesForSelector(ciliumSel, injectedIDs)
+	idNotifier.InjectIdentitiesForSelector(ciliumSel, injectedIDs)
 
 	// Add a user without adding identities explicitly. The identityNotifier
 	// should have populated them for us.
@@ -500,36 +509,8 @@ func (ds *SelectorCacheTestSuite) TestIdentityNotifier(c *C) {
 
 }
 
-type dummyIdentityNotifier struct {
-	selectors map[api.FQDNSelector][]identity.NumericIdentity
-}
-
-func newDummyIdentityNotifier() *dummyIdentityNotifier {
-	return &dummyIdentityNotifier{
-		selectors: make(map[api.FQDNSelector][]identity.NumericIdentity),
-	}
-}
-
-// RegisterForIdentityUpdates starts managing this selector.
-func (d *dummyIdentityNotifier) RegisterForIdentityUpdates(selector api.FQDNSelector) (identities []identity.NumericIdentity) {
-	ids, ok := d.selectors[selector]
-	if !ok {
-		d.selectors[selector] = []identity.NumericIdentity{}
-	}
-	return ids
-}
-
-// UnregisterForIdentityUpdates stops managing this selector.
-func (d *dummyIdentityNotifier) UnregisterForIdentityUpdates(selector api.FQDNSelector) {
-	delete(d.selectors, selector)
-}
-
-func (d *dummyIdentityNotifier) injectIdentitiesForSelector(fqdnSel api.FQDNSelector, ids []identity.NumericIdentity) {
-	d.selectors[fqdnSel] = ids
-}
-
-// IsRegistered returns whether this selector is being managed.
-func (d *dummyIdentityNotifier) IsRegistered(selector api.FQDNSelector) bool {
-	_, ok := d.selectors[selector]
-	return ok
+func testNewSelectorCache(ids cache.IdentityCache) *SelectorCache {
+	sc := NewSelectorCache(ids)
+	sc.SetLocalIdentityNotifier(testutils.NewDummyIdentityNotifier())
+	return sc
 }

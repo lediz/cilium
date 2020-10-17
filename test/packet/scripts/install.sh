@@ -5,7 +5,7 @@ set -e
 # Ensure no prompts from apt & co.
 export DEBIAN_FRONTEND=noninteractive
 
-GOLANG_VERSION="1.13.5"
+GOLANG_VERSION="1.15.3"
 VAGRANT_VERSION="2.2.4"
 PACKER_VERSION="1.3.5"
 VIRTUALBOX_VERSION="6.0"
@@ -43,7 +43,7 @@ cp /provision/add_vagrant_box.sh /usr/local/bin/
 chmod 755 /usr/local/bin/add_vagrant_box.sh
 
 curl -s https://raw.githubusercontent.com/cilium/cilium/master/vagrant_box_defaults.rb > defaults.rb
-/usr/local/bin/add_vagrant_box defaults.rb
+/usr/local/bin/add_vagrant_box.sh defaults.rb
 
 wget https://releases.hashicorp.com/packer/${PACKER_VERSION}/packer_${PACKER_VERSION}_linux_amd64.zip
 unzip packer_${PACKER_VERSION}_linux_amd64.zip
@@ -65,7 +65,6 @@ sudo ln -s /usr/local/go/bin/* /usr/local/bin/
 go version
 sudo mkdir /go/
 export GOPATH=/go/
-go get -u github.com/cilium/go-bindata/...
 go get -u github.com/google/gops
 go get -u github.com/onsi/ginkgo/ginkgo
 go get -u github.com/onsi/gomega/...

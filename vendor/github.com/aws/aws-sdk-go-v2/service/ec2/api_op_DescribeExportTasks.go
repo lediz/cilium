@@ -14,6 +14,9 @@ type DescribeExportTasksInput struct {
 
 	// The export task IDs.
 	ExportTaskIds []string `locationName:"exportTaskId" locationNameList:"ExportTaskId" type:"list"`
+
+	// the filters for the export tasks.
+	Filters []Filter `locationName:"Filter" locationNameList:"Filter" type:"list"`
 }
 
 // String returns the string representation
@@ -38,7 +41,7 @@ const opDescribeExportTasks = "DescribeExportTasks"
 // DescribeExportTasksRequest returns a request value for making API operation for
 // Amazon Elastic Compute Cloud.
 //
-// Describes the specified export instance tasks or all your export instance
+// Describes the specified export instance tasks or all of your export instance
 // tasks.
 //
 //    // Example sending a request using DescribeExportTasksRequest.
@@ -61,6 +64,7 @@ func (c *Client) DescribeExportTasksRequest(input *DescribeExportTasksInput) Des
 	}
 
 	req := c.newRequest(op, input, &DescribeExportTasksOutput{})
+
 	return DescribeExportTasksRequest{Request: req, Input: input, Copy: c.DescribeExportTasksRequest}
 }
 

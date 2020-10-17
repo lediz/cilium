@@ -17,20 +17,13 @@ package RuntimeTest
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"strings"
-	"time"
 
 	. "github.com/cilium/cilium/test/ginkgo-ext"
 	"github.com/cilium/cilium/test/helpers"
 
 	. "github.com/onsi/gomega"
 )
-
-func init() {
-	// ensure that our random numbers are seeded differently on each run
-	rand.Seed(time.Now().UnixNano())
-}
 
 const (
 	// MonitorDropNotification represents the DropNotification configuration
@@ -50,8 +43,19 @@ var _ = Describe("RuntimeMonitorTest", func() {
 		vm = helpers.InitRuntimeHelper(helpers.Runtime, logger)
 		ExpectCiliumReady(vm)
 
+		dbgDone := vm.MonitorDebug(true, "")
+		Expect(dbgDone).Should(BeTrue())
+
 		areEndpointsReady := vm.WaitEndpointsReady()
 		Expect(areEndpointsReady).Should(BeTrue())
+
+		endpoints, err := vm.GetEndpointsIds()
+		Expect(err).Should(BeNil())
+
+		for _, v := range endpoints {
+			dbgDone := vm.MonitorDebug(true, v)
+			Expect(dbgDone).Should(BeTrue())
+		}
 	})
 
 	JustAfterEach(func() {
@@ -67,6 +71,17 @@ var _ = Describe("RuntimeMonitorTest", func() {
 	})
 
 	AfterAll(func() {
+		endpoints, err := vm.GetEndpointsIds()
+		Expect(err).Should(BeNil())
+
+		for _, v := range endpoints {
+			dbgDone := vm.MonitorDebug(false, v)
+			Expect(dbgDone).Should(BeTrue())
+		}
+
+		dbgDone := vm.MonitorDebug(false, "")
+		Expect(dbgDone).Should(BeTrue())
+
 		vm.CloseSSHClient()
 	})
 
@@ -94,7 +109,7 @@ var _ = Describe("RuntimeMonitorTest", func() {
 			monitorConfig()
 
 			ctx, cancel := context.WithCancel(context.Background())
-			res := vm.ExecInBackground(ctx, "cilium monitor -v")
+			res := vm.ExecInBackground(ctx, "cilium monitor -vv")
 			defer cancel()
 
 			areEndpointsReady := vm.WaitEndpointsReady()
@@ -108,7 +123,7 @@ var _ = Describe("RuntimeMonitorTest", func() {
 				vm.ContainerExec(k, helpers.Ping(helpers.Httpd1))
 				Expect(res.WaitUntilMatch(filter)).To(BeNil(),
 					"%q is not in the output after timeout", filter)
-				Expect(res.Output().String()).Should(ContainSubstring(filter))
+				Expect(res.Stdout()).Should(ContainSubstring(filter))
 			}
 		})
 
@@ -132,7 +147,7 @@ var _ = Describe("RuntimeMonitorTest", func() {
 
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
-				res := vm.ExecInBackground(ctx, fmt.Sprintf("cilium monitor --type %s -v", k))
+				res := vm.ExecInBackground(ctx, fmt.Sprintf("cilium monitor --type %s -vv", k))
 
 				vm.ContainerExec(helpers.App1, helpers.Ping(helpers.Httpd1))
 				vm.ContainerExec(helpers.App3, helpers.Ping(helpers.Httpd1))
@@ -140,12 +155,12 @@ var _ = Describe("RuntimeMonitorTest", func() {
 				Expect(res.WaitUntilMatch(v)).To(BeNil(),
 					"%q is not in the output after timeout", v)
 				Expect(res.CountLines()).Should(BeNumerically(">", 3))
-				Expect(res.Output().String()).Should(ContainSubstring(v))
+				Expect(res.Stdout()).Should(ContainSubstring(v))
 				cancel()
 			}
 
 			By("all types together")
-			command := "cilium monitor -v"
+			command := "cilium monitor -vv"
 			for k := range eventTypes {
 				command = command + " --type " + k
 			}
@@ -165,7 +180,7 @@ var _ = Describe("RuntimeMonitorTest", func() {
 			for _, v := range eventTypes {
 				Expect(res.WaitUntilMatch(v)).To(BeNil(),
 					"%q is not in the output after timeout", v)
-				Expect(res.Output().String()).Should(ContainSubstring(v))
+				Expect(res.Stdout()).Should(ContainSubstring(v))
 			}
 
 			Expect(res.CountLines()).Should(BeNumerically(">", 3))
@@ -184,17 +199,17 @@ var _ = Describe("RuntimeMonitorTest", func() {
 			defer cancel()
 
 			res := vm.ExecInBackground(ctx, fmt.Sprintf(
-				"cilium monitor --type debug --from %s -v", endpoints[helpers.App1]))
+				"cilium monitor --type debug --from %s -vv", endpoints[helpers.App1]))
 			vm.ContainerExec(helpers.App1, helpers.Ping(helpers.Httpd1))
 
 			filter := fmt.Sprintf("FROM %s DEBUG:", endpoints[helpers.App1])
 			Expect(res.WaitUntilMatch(filter)).To(BeNil(),
 				"%q is not in the output after timeout", filter)
 			Expect(res.CountLines()).Should(BeNumerically(">", 3))
-			Expect(res.Output().String()).Should(ContainSubstring(filter))
+			Expect(res.Stdout()).Should(ContainSubstring(filter))
 
 			//MonitorDebug mode shouldn't have DROP lines
-			Expect(res.Output().String()).ShouldNot(ContainSubstring("DROP"))
+			Expect(res.Stdout()).ShouldNot(ContainSubstring("DROP"))
 		})
 
 		It("cilium monitor check --to", func() {
@@ -209,7 +224,7 @@ var _ = Describe("RuntimeMonitorTest", func() {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			res := vm.ExecInBackground(ctx, fmt.Sprintf(
-				"cilium monitor -v --to %s", endpoints[helpers.Httpd1]))
+				"cilium monitor -vv --to %s", endpoints[helpers.Httpd1]))
 
 			vm.ContainerExec(helpers.App1, helpers.Ping(helpers.Httpd1))
 			vm.ContainerExec(helpers.App2, helpers.Ping(helpers.Httpd1))
@@ -218,7 +233,7 @@ var _ = Describe("RuntimeMonitorTest", func() {
 			Expect(res.WaitUntilMatch(filter)).To(BeNil(),
 				"%q is not in the output after timeout", filter)
 			Expect(res.CountLines()).Should(BeNumerically(">=", 3))
-			Expect(res.Output().String()).Should(ContainSubstring(filter))
+			Expect(res.Stdout()).Should(ContainSubstring(filter))
 		})
 
 		It("cilium monitor check --related-to", func() {
@@ -233,7 +248,7 @@ var _ = Describe("RuntimeMonitorTest", func() {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			res := vm.ExecInBackground(ctx, fmt.Sprintf(
-				"cilium monitor -v --related-to %s", endpoints[helpers.Httpd1]))
+				"cilium monitor -vv --related-to %s", endpoints[helpers.Httpd1]))
 
 			vm.WaitEndpointsReady()
 			vm.ContainerExec(helpers.App1, helpers.CurlFail("http://httpd1/public"))
@@ -242,7 +257,7 @@ var _ = Describe("RuntimeMonitorTest", func() {
 			Expect(res.WaitUntilMatch(filter)).To(BeNil(),
 				"%q is not in the output after timeout", filter)
 			Expect(res.CountLines()).Should(BeNumerically(">=", 3))
-			Expect(res.Output().String()).Should(ContainSubstring(filter))
+			Expect(res.Stdout()).Should(ContainSubstring(filter))
 		})
 
 		It("delivers the same information to multiple monitors", func() {
@@ -312,7 +327,7 @@ var _ = Describe("RuntimeMonitorTest", func() {
 			ExpectPolicyEnforcementUpdated(vm, helpers.PolicyEnforcementAlways)
 
 			ctx, cancel := context.WithCancel(context.Background())
-			res := vm.ExecInBackground(ctx, "cilium monitor -v")
+			res := vm.ExecInBackground(ctx, "cilium monitor -vv")
 
 			vm.ContainerExec(helpers.App1, helpers.Ping(helpers.Httpd1))
 			vm.ContainerExec(helpers.Httpd1, helpers.Ping(helpers.App1))
@@ -334,10 +349,8 @@ var _ = Describe("RuntimeMonitorTest", func() {
 					switch fields[i] {
 					case "FROM":
 						fromID = fields[i+1]
-						break
 					case "id":
 						toID = fields[i+1]
-						break
 					}
 				}
 				if fromID == "" || toID == "" {

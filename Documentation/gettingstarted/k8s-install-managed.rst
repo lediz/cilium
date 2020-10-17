@@ -2,7 +2,7 @@
 
     WARNING: You are looking at unreleased Cilium documentation.
     Please use the official rendered version released here:
-    http://docs.cilium.io
+    https://docs.cilium.io
 
 ******************
 Managed Kubernetes
@@ -20,3 +20,4 @@ working out of the box as well.
    k8s-install-eks
    k8s-install-gke
    k8s-install-aks
+   k8s-install-azure

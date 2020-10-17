@@ -26,7 +26,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/cilium/cilium/common/addressing"
+	"github.com/cilium/cilium/pkg/addressing"
 	"github.com/cilium/cilium/pkg/checker"
 	linuxDatapath "github.com/cilium/cilium/pkg/datapath/linux"
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
@@ -90,7 +90,8 @@ func (ds *EndpointSuite) endpointCreator(id uint16, secID identity.NumericIdenti
 
 var (
 	regenerationMetadata = &regeneration.ExternalRegenerationMetadata{
-		Reason: "test",
+		Reason:            "test",
+		RegenerationLevel: regeneration.RegenerateWithoutDatapath,
 	}
 )
 
@@ -145,7 +146,7 @@ func (ds *EndpointSuite) TestReadEPsFromDirNames(c *C) {
 	c.Assert(len(eps), Equals, len(epsWanted))
 
 	sort.Slice(epsWanted, func(i, j int) bool { return epsWanted[i].ID < epsWanted[j].ID })
-	var restoredEPs []*Endpoint
+	restoredEPs := make([]*Endpoint, 0, len(eps))
 	for _, ep := range eps {
 		restoredEPs = append(restoredEPs, ep)
 	}
@@ -226,6 +227,46 @@ func (ds *EndpointSuite) TestReadEPsFromDirNamesWithRestoreFailure(c *C) {
 	}
 	c.Assert(fileExists(nextDir), checker.Equals, false)
 	c.Assert(fileExists(fullDirName), checker.Equals, true)
+}
+
+func (ds *EndpointSuite) BenchmarkReadEPsFromDirNames(c *C) {
+	c.StopTimer()
+
+	// For this benchmark, the real linux datapath is necessary to properly
+	// serialize config files to disk and benchmark the restore.
+	oldDatapath := ds.datapath
+	defer func() {
+		ds.datapath = oldDatapath
+	}()
+	ds.datapath = linuxDatapath.NewDatapath(linuxDatapath.DatapathConfiguration{}, nil)
+
+	epsWanted, _ := ds.createEndpoints()
+	tmpDir, err := ioutil.TempDir("", "cilium-tests")
+	defer func() {
+		os.RemoveAll(tmpDir)
+	}()
+
+	os.Chdir(tmpDir)
+	c.Assert(err, IsNil)
+	epsNames := []string{}
+	for _, ep := range epsWanted {
+		c.Assert(ep, NotNil)
+
+		fullDirName := filepath.Join(tmpDir, ep.DirectoryPath())
+		err := os.MkdirAll(fullDirName, 0777)
+		c.Assert(err, IsNil)
+
+		err = ep.writeHeaderfile(fullDirName)
+		c.Assert(err, IsNil)
+
+		epsNames = append(epsNames, ep.DirectoryPath())
+	}
+	c.StartTimer()
+
+	for i := 0; i < c.N; i++ {
+		eps := ReadEPsFromDirNames(context.TODO(), ds, tmpDir, epsNames)
+		c.Assert(len(eps), Equals, len(epsWanted))
+	}
 }
 
 func (ds *EndpointSuite) TestPartitionEPDirNamesByRestoreStatus(c *C) {

@@ -15,15 +15,12 @@
 package endpoint
 
 import (
-	"fmt"
 	"reflect"
 
 	"github.com/cilium/cilium/pkg/completion"
-	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/proxy/logger"
 	"github.com/cilium/cilium/pkg/revert"
-	"github.com/sirupsen/logrus"
 )
 
 // EndpointProxy defines any L7 proxy with which an Endpoint must interact.
@@ -40,28 +37,6 @@ func (e *Endpoint) SetProxy(p EndpointProxy) {
 	e.unconditionalLock()
 	defer e.unlock()
 	e.proxy = p
-}
-
-// updateProxyRedirect updates the redirect rules in the proxy for a particular
-// endpoint using the provided L4 filter. Returns the allocated proxy port
-func (e *Endpoint) updateProxyRedirect(l4 *policy.L4Filter, proxyWaitGroup *completion.WaitGroup) (proxyPort uint16, err error, finalizeFunc revert.FinalizeFunc, revertFunc revert.RevertFunc) {
-	if e.isProxyDisabled() {
-		return 0, fmt.Errorf("can't redirect, proxy disabled"), nil, nil
-	}
-	return e.proxy.CreateOrUpdateRedirect(l4, e.ProxyID(l4), e, proxyWaitGroup)
-}
-
-// removeProxyRedirect removes a previously installed proxy redirect for an
-// endpoint.
-func (e *Endpoint) removeProxyRedirect(id string, proxyWaitGroup *completion.WaitGroup) (error, revert.FinalizeFunc, revert.RevertFunc) {
-	if e.isProxyDisabled() {
-		return nil, nil, nil
-	}
-	log.WithFields(logrus.Fields{
-		logfields.EndpointID: e.ID,
-		logfields.L4PolicyID: id,
-	}).Debug("Removing redirect to endpoint")
-	return e.proxy.RemoveRedirect(id, proxyWaitGroup)
 }
 
 func (e *Endpoint) removeNetworkPolicy() {

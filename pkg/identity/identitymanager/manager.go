@@ -17,6 +17,7 @@ package identitymanager
 import (
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/identity"
+	"github.com/cilium/cilium/pkg/identity/model"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 
@@ -112,7 +113,9 @@ func (idm *IdentityManager) RemoveOldAddNew(old, new *identity.Identity) {
 	if old == nil && new == nil {
 		return
 	}
-	if old != nil && new != nil && old.ID == new.ID {
+	// The host endpoint will always retain its reserved ID, but its labels may
+	// change so we need to update its identity.
+	if old != nil && new != nil && old.ID == new.ID && new.ID != identity.ReservedIdentityHost {
 		return
 	}
 
@@ -187,7 +190,7 @@ func (idm *IdentityManager) GetIdentityModels() []*models.IdentityEndpoints {
 
 	for _, v := range idm.identities {
 		identities = append(identities, &models.IdentityEndpoints{
-			Identity: v.identity.GetModel(),
+			Identity: model.CreateModel(v.identity),
 			RefCount: int64(v.refCount),
 		})
 	}

@@ -2,7 +2,7 @@
 
     WARNING: You are looking at unreleased Cilium documentation.
     Please use the official rendered version released here:
-    http://docs.cilium.io
+    https://docs.cilium.io
 
 .. _policy_troubleshooting:
 
@@ -21,7 +21,7 @@ verify if and what policy rules apply between two
 endpoints. We can use the ``cilium policy trace`` to simulate a policy decision 
 between the source and destination endpoints.
 
-We will use the example from the `Minikube Getting Started Guide <http://cilium.readthedocs.io/en/latest/gettingstarted/minikube/#getting-started-using-minikube>`_ to trace the policy. In this example, there is:
+We will use the example from the `Minikube Getting Started Guide <https://cilium.readthedocs.io/en/latest/gettingstarted/minikube/#getting-started-using-minikube>`_ to trace the policy. In this example, there is:
 
 * ``deathstar`` service identified by labels: ``org=empire, class=deathstar``. The service is backed by two pods.
 * ``tiefighter`` spaceship client pod with labels: ``org=empire, class=tiefighter``
@@ -103,7 +103,7 @@ In the above example, for one of the ``deathstar`` pods the endpoint id is 568. 
 
     # Get a shell on the Cilium pod
 
-    $ kubectl exec -ti cilium-88k78 -n kube-system /bin/bash
+    $ kubectl exec -ti cilium-88k78 -n kube-system -- /bin/bash
 
     # print out the ingress labels
     # clean up the data

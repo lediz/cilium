@@ -2,7 +2,7 @@
   
     WARNING: You are looking at unreleased Cilium documentation.
     Please use the official rendered version released here:
-    http://docs.cilium.io
+    https://docs.cilium.io
 
 .. _unit_testing:
 
@@ -62,6 +62,29 @@ run the unit tests and tear down the prerequisites:
 ::
 
     $ make unit-tests TESTPKGS=github.com/cilium/cilium/pkg/kvstore
+
+Some packages have privileged tests. They are not run by default when you run
+the unit tests for the respective package. The privileged test files have an
+entry at the top of the test file as shown.
+
+::
+
+    +build privileged_tests
+
+There are two ways that you can run the 'privileged' tests.
+
+1. To run all the 'privileged' tests for cilium follow the instructions below.
+
+::
+
+    $ sudo -E make tests-privileged
+
+2. To run a specific package 'privileged' test, follow the instructions below.
+   Here for example we are trying to run the tests for 'routing' package.
+
+::
+
+    $ TESTPKGS="pkg/aws/eni/routing" sudo -E make tests-privileged
 
 Running individual tests
 ^^^^^^^^^^^^^^^^^^^^^^^^

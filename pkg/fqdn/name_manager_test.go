@@ -28,12 +28,6 @@ import (
 	. "gopkg.in/check.v1"
 )
 
-// force a fail if something calls this function
-func lookupFail(c *C, dnsNames []string) (DNSIPs map[string]*DNSIPRecords, errorDNSNames map[string]error) {
-	c.Error("Lookup function called when it should not")
-	return nil, nil
-}
-
 // TestNameManagerCIDRGeneration tests rule generation output:
 // add a rule, get correct IP4/6 in ToCIDRSet
 // add a rule, lookup twice, get correct IP4/6 in TOCIDRSet after change
@@ -47,10 +41,6 @@ func (ds *FQDNTestSuite) TestNameManagerCIDRGeneration(c *C) {
 			MinTTL: 1,
 			Cache:  NewDNSCache(0),
 
-			LookupDNSNames: func(dnsNames []string) (DNSIPs map[string]*DNSIPRecords, errorDNSNames map[string]error) {
-				return lookupFail(c, dnsNames)
-			},
-
 			UpdateSelectors: func(ctx context.Context, selectorIPMapping map[api.FQDNSelector][]net.IP, selectorsWithoutIPs []api.FQDNSelector) (*sync.WaitGroup, error) {
 				for k, v := range selectorIPMapping {
 					selIPMap[k] = v
@@ -61,7 +51,9 @@ func (ds *FQDNTestSuite) TestNameManagerCIDRGeneration(c *C) {
 	)
 
 	// add rules
-	ids := nameManager.RegisterForIdentityUpdates(ciliumIOSel)
+	nameManager.Lock()
+	ids := nameManager.RegisterForIdentityUpdatesLocked(ciliumIOSel)
+	nameManager.Unlock()
 	c.Assert(len(ids), Equals, 0)
 	c.Assert(ids, Not(IsNil))
 
@@ -97,10 +89,6 @@ func (ds *FQDNTestSuite) TestNameManagerMultiIPUpdate(c *C) {
 			MinTTL: 1,
 			Cache:  NewDNSCache(0),
 
-			LookupDNSNames: func(dnsNames []string) (DNSIPs map[string]*DNSIPRecords, errorDNSNames map[string]error) {
-				return lookupFail(c, dnsNames)
-			},
-
 			UpdateSelectors: func(ctx context.Context, selectorIPMapping map[api.FQDNSelector][]net.IP, selectorsWithoutIPs []api.FQDNSelector) (*sync.WaitGroup, error) {
 				for k, v := range selectorIPMapping {
 					selIPMap[k] = v
@@ -112,10 +100,12 @@ func (ds *FQDNTestSuite) TestNameManagerMultiIPUpdate(c *C) {
 
 	// add rules
 	selectorsToAdd := api.FQDNSelectorSlice{ciliumIOSel, githubSel}
+	nameManager.Lock()
 	for _, sel := range selectorsToAdd {
-		ids := nameManager.RegisterForIdentityUpdates(sel)
+		ids := nameManager.RegisterForIdentityUpdatesLocked(sel)
 		c.Assert(ids, Not(IsNil))
 	}
+	nameManager.Unlock()
 
 	// poll DNS once, check that we only generate 1 IP for cilium.io
 	selIPMap = make(map[api.FQDNSelector][]net.IP)
@@ -150,16 +140,18 @@ func (ds *FQDNTestSuite) TestNameManagerMultiIPUpdate(c *C) {
 	c.Assert(selIPMap[githubSel][0].Equal(net.ParseIP("3.3.3.3")), Equals, true, Commentf("Incorrect IP mapping to FQDN"))
 	c.Assert(selIPMap[githubSel][1].Equal(net.ParseIP("4.4.4.4")), Equals, true, Commentf("Incorrect IP mapping to FQDN"))
 
-	// Second registration returns nil
-	ids := nameManager.RegisterForIdentityUpdates(githubSel)
+	// Second registration fails because IdenitityAllocator is not initialized
+	nameManager.Lock()
+	ids := nameManager.RegisterForIdentityUpdatesLocked(githubSel)
 	c.Assert(ids, IsNil)
 
-	nameManager.UnregisterForIdentityUpdates(githubSel)
+	nameManager.UnregisterForIdentityUpdatesLocked(githubSel)
 	_, exists := nameManager.allSelectors[githubSel]
 	c.Assert(exists, Equals, false)
 
-	nameManager.UnregisterForIdentityUpdates(ciliumIOSel)
+	nameManager.UnregisterForIdentityUpdatesLocked(ciliumIOSel)
 	_, exists = nameManager.allSelectors[ciliumIOSel]
 	c.Assert(exists, Equals, false)
+	nameManager.Unlock()
 
 }

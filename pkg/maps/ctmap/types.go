@@ -24,84 +24,84 @@ import (
 	"github.com/cilium/cilium/pkg/tuple"
 )
 
+// mapType is a type of connection tracking map.
+type mapType int
+
 const (
-	// MapTypeIPv4TCPLocal and friends are MapTypes which correspond to a
+	// mapTypeIPv4TCPLocal and friends are map types which correspond to a
 	// combination of the following attributes:
 	// * IPv4 or IPv6;
 	// * TCP or non-TCP (shortened to Any)
 	// * Local (endpoint-specific) or global (endpoint-oblivious).
-	MapTypeIPv4TCPLocal = iota
-	MapTypeIPv6TCPLocal
-	MapTypeIPv4TCPGlobal
-	MapTypeIPv6TCPGlobal
-	MapTypeIPv4AnyLocal
-	MapTypeIPv6AnyLocal
-	MapTypeIPv4AnyGlobal
-	MapTypeIPv6AnyGlobal
-	MapTypeMax
+	mapTypeIPv4TCPLocal mapType = iota
+	mapTypeIPv6TCPLocal
+	mapTypeIPv4TCPGlobal
+	mapTypeIPv6TCPGlobal
+	mapTypeIPv4AnyLocal
+	mapTypeIPv6AnyLocal
+	mapTypeIPv4AnyGlobal
+	mapTypeIPv6AnyGlobal
+	mapTypeMax
 )
 
-// MapType is a type of connection tracking map.
-type MapType int
-
 // String renders the map type into a user-readable string.
-func (m MapType) String() string {
+func (m mapType) String() string {
 	switch m {
-	case MapTypeIPv4TCPLocal:
+	case mapTypeIPv4TCPLocal:
 		return "Local IPv4 TCP CT map"
-	case MapTypeIPv6TCPLocal:
+	case mapTypeIPv6TCPLocal:
 		return "Local IPv6 TCP CT map"
-	case MapTypeIPv4TCPGlobal:
+	case mapTypeIPv4TCPGlobal:
 		return "Global IPv4 TCP CT map"
-	case MapTypeIPv6TCPGlobal:
+	case mapTypeIPv6TCPGlobal:
 		return "Global IPv6 TCP CT map"
-	case MapTypeIPv4AnyLocal:
+	case mapTypeIPv4AnyLocal:
 		return "Local IPv4 non-TCP CT map"
-	case MapTypeIPv6AnyLocal:
+	case mapTypeIPv6AnyLocal:
 		return "Local IPv6 non-TCP CT map"
-	case MapTypeIPv4AnyGlobal:
+	case mapTypeIPv4AnyGlobal:
 		return "Global IPv4 non-TCP CT map"
-	case MapTypeIPv6AnyGlobal:
+	case mapTypeIPv6AnyGlobal:
 		return "Global IPv6 non-TCP CT map"
 	}
 	return fmt.Sprintf("Unknown (%d)", int(m))
 }
 
-func (m MapType) isIPv4() bool {
+func (m mapType) isIPv4() bool {
 	switch m {
-	case MapTypeIPv4TCPLocal, MapTypeIPv4TCPGlobal, MapTypeIPv4AnyLocal, MapTypeIPv4AnyGlobal:
+	case mapTypeIPv4TCPLocal, mapTypeIPv4TCPGlobal, mapTypeIPv4AnyLocal, mapTypeIPv4AnyGlobal:
 		return true
 	}
 	return false
 }
 
-func (m MapType) isIPv6() bool {
+func (m mapType) isIPv6() bool {
 	switch m {
-	case MapTypeIPv6TCPLocal, MapTypeIPv6TCPGlobal, MapTypeIPv6AnyLocal, MapTypeIPv6AnyGlobal:
+	case mapTypeIPv6TCPLocal, mapTypeIPv6TCPGlobal, mapTypeIPv6AnyLocal, mapTypeIPv6AnyGlobal:
 		return true
 	}
 	return false
 }
 
-func (m MapType) isLocal() bool {
+func (m mapType) isLocal() bool {
 	switch m {
-	case MapTypeIPv4TCPLocal, MapTypeIPv6TCPLocal, MapTypeIPv4AnyLocal, MapTypeIPv6AnyLocal:
+	case mapTypeIPv4TCPLocal, mapTypeIPv6TCPLocal, mapTypeIPv4AnyLocal, mapTypeIPv6AnyLocal:
 		return true
 	}
 	return false
 }
 
-func (m MapType) isGlobal() bool {
+func (m mapType) isGlobal() bool {
 	switch m {
-	case MapTypeIPv4TCPGlobal, MapTypeIPv6TCPGlobal, MapTypeIPv4AnyGlobal, MapTypeIPv6AnyGlobal:
+	case mapTypeIPv4TCPGlobal, mapTypeIPv6TCPGlobal, mapTypeIPv4AnyGlobal, mapTypeIPv6AnyGlobal:
 		return true
 	}
 	return false
 }
 
-func (m MapType) isTCP() bool {
+func (m mapType) isTCP() bool {
 	switch m {
-	case MapTypeIPv4TCPLocal, MapTypeIPv6TCPLocal, MapTypeIPv4TCPGlobal, MapTypeIPv6TCPGlobal:
+	case mapTypeIPv4TCPLocal, mapTypeIPv6TCPLocal, mapTypeIPv4TCPGlobal, mapTypeIPv6TCPGlobal:
 		return true
 	}
 	return false
@@ -381,6 +381,8 @@ type CtKey6Global struct {
 	tuple.TupleKey6Global
 }
 
+const SizeofCtKey6Global = int(unsafe.Sizeof(CtKey6Global{}))
+
 // NewValue creates a new bpf.MapValue.
 func (k *CtKey6Global) NewValue() bpf.MapValue { return &CtEntry{} }
 
@@ -475,7 +477,7 @@ type CtEntry struct {
 	Flags     uint16 `align:"rx_closing"`
 	// RevNAT is in network byte order
 	RevNAT           uint16 `align:"rev_nat_index"`
-	_                uint16 `align:"backend_id"`
+	IfIndex          uint16 `align:"ifindex"`
 	TxFlagsSeen      uint8  `align:"tx_flags_seen"`
 	RxFlagsSeen      uint8  `align:"rx_flags_seen"`
 	SourceSecurityID uint32 `align:"src_sec_id"`
@@ -483,16 +485,21 @@ type CtEntry struct {
 	LastRxReport     uint32 `align:"last_rx_report"`
 }
 
+const SizeofCtEntry = int(unsafe.Sizeof(CtEntry{}))
+
 // GetValuePtr returns the unsafe.Pointer for s.
 func (c *CtEntry) GetValuePtr() unsafe.Pointer { return unsafe.Pointer(c) }
 
 const (
-	RxClosing  = 1 << 0
-	TxClosing  = 1 << 1
-	Nat64      = 1 << 2
-	LBLoopback = 1 << 3
-	SeenNonSyn = 1 << 4
-	NodePort   = 1 << 5
+	RxClosing = 1 << iota
+	TxClosing
+	Nat64
+	LBLoopback
+	SeenNonSyn
+	NodePort
+	ProxyRedirect
+	DSR
+	MaxFlags
 )
 
 func (c *CtEntry) flagsString() string {
@@ -517,13 +524,25 @@ func (c *CtEntry) flagsString() string {
 	if (c.Flags & NodePort) != 0 {
 		buffer.WriteString("NodePort ")
 	}
+	if (c.Flags & ProxyRedirect) != 0 {
+		buffer.WriteString("ProxyRedirect ")
+	}
+	if (c.Flags & DSR) != 0 {
+		buffer.WriteString("DSR ")
+	}
+
+	unknownFlags := c.Flags
+	unknownFlags &^= MaxFlags - 1
+	if unknownFlags != 0 {
+		buffer.WriteString(fmt.Sprintf("Unknown=%#04x ", unknownFlags))
+	}
 	buffer.WriteString("]")
 	return buffer.String()
 }
 
 // String returns the readable format
 func (c *CtEntry) String() string {
-	return fmt.Sprintf("expires=%d RxPackets=%d RxBytes=%d RxFlagsSeen=%#02x LastRxReport=%d TxPackets=%d TxBytes=%d TxFlagsSeen=%#02x LastTxReport=%d %s RevNAT=%d SourceSecurityID=%d \n",
+	return fmt.Sprintf("expires=%d RxPackets=%d RxBytes=%d RxFlagsSeen=%#02x LastRxReport=%d TxPackets=%d TxBytes=%d TxFlagsSeen=%#02x LastTxReport=%d %s RevNAT=%d SourceSecurityID=%d IfIndex=%d \n",
 		c.Lifetime,
 		c.RxPackets,
 		c.RxBytes,
@@ -535,5 +554,6 @@ func (c *CtEntry) String() string {
 		c.LastTxReport,
 		c.flagsString(),
 		byteorder.NetworkToHost(c.RevNAT),
-		c.SourceSecurityID)
+		c.SourceSecurityID,
+		c.IfIndex)
 }

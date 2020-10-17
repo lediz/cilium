@@ -15,17 +15,11 @@
 package metrics
 
 import (
-	"time"
-
 	clientPkg "github.com/cilium/cilium/pkg/client"
 	healthClientPkg "github.com/cilium/cilium/pkg/health/client"
 
 	"github.com/prometheus/client_golang/prometheus"
 	log "github.com/sirupsen/logrus"
-)
-
-const (
-	updateLatencyMetricsInterval = 30 * time.Second
 )
 
 type statusCollector struct {
@@ -145,11 +139,15 @@ func (s *statusCollector) Collect(ch chan<- prometheus.Metric) {
 	)
 
 	for _, nodeStatus := range healthStatusResponse.Payload.Nodes {
-		if !healthClientPkg.PathIsHealthy(healthClientPkg.GetHostPrimaryAddress(nodeStatus)) {
+		switch healthClientPkg.GetPathConnectivityStatusType(healthClientPkg.GetHostPrimaryAddress(nodeStatus)) {
+		case healthClientPkg.ConnStatusUnreachable:
 			unreachableNodes++
 		}
-		if nodeStatus.Endpoint != nil && !healthClientPkg.PathIsHealthy(nodeStatus.Endpoint) {
-			unreachableEndpoints++
+		if nodeStatus.Endpoint != nil {
+			switch healthClientPkg.GetPathConnectivityStatusType(nodeStatus.Endpoint) {
+			case healthClientPkg.ConnStatusUnreachable:
+				unreachableEndpoints++
+			}
 		}
 	}
 

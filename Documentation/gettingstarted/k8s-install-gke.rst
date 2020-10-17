@@ -2,7 +2,7 @@
 
     WARNING: You are looking at unreleased Cilium documentation.
     Please use the official rendered version released here:
-    http://docs.cilium.io
+    https://docs.cilium.io
 
 .. _k8s_install_gke:
 
@@ -21,27 +21,38 @@ GKE Requirements
 
    export GKE_PROJECT=gke-clusters
    gcloud projects create $GKE_PROJECT
+   gcloud config set project $GKE_PROJECT
 
 
 3. Enable the GKE API for the project if not already done
 
 ::
 
-   gcloud services enable --project $GKE_PROJECT container.googleapis.com
+   gcloud services enable container.googleapis.com
 
 Create a GKE Cluster
 ====================
 
 You can apply any method to create a GKE cluster. The example given here is
-using the `Google Cloud SDK <https://cloud.google.com/sdk/>`_. This guide
-will create a cluster on zone ``europe-west4-a``; feel free to change the zone
-if you are in a different region of the globe.
+using the `Google Cloud SDK <https://cloud.google.com/sdk/>`_.
+
+.. note:: Either of the cluster zone or region must be specified in ``gcloud``
+          commands below. The full list of locations is available on
+          `this page <https://cloud.google.com/compute/docs/regions-zones#locations>`_.
+          This guide uses ``--zone`` to specify the zone but you may replace
+          this flag with ``--region`` instead.
 
 .. code:: bash
 
-    export GKE_ZONE="europe-west4-a"
-    gcloud container --project $GKE_PROJECT clusters create cluster1 \
-       --username "admin" --image-type COS --num-nodes 2 --zone ${GKE_ZONE}
+    export CLUSTER_NAME=cluster1
+    export CLUSTER_ZONE=us-west2-a
+    gcloud container clusters create $CLUSTER_NAME --image-type COS --num-nodes 2 --machine-type n1-standard-4 --zone $CLUSTER_ZONE
+
+Retrieve the credentials to access the cluster:
+
+.. code:: bash
+
+    gcloud container clusters get-credentials $CLUSTER_NAME --zone $CLUSTER_ZONE
 
 When done, you should be able to access your cluster like this:
 
@@ -49,25 +60,25 @@ When done, you should be able to access your cluster like this:
 
     kubectl get nodes
     NAME                                      STATUS   ROLES    AGE   VERSION
-    gke-cluster1-default-pool-a63a765c-flr2   Ready    <none>   6m    v1.11.7-gke.4
-    gke-cluster1-default-pool-a63a765c-z73c   Ready    <none>   6m    v1.11.7-gke.4
+    gke-cluster1-default-pool-a63a765c-flr2   Ready    <none>   6m    v1.14.10-gke.36
+    gke-cluster1-default-pool-a63a765c-z73c   Ready    <none>   6m    v1.14.10-gke.36
 
-Create a cluster-admin-binding
-==============================
+Deploy Cilium
+=============
+
+Extract the Cluster CIDR to enable native-routing:
 
 .. code:: bash
 
-    kubectl create clusterrolebinding cluster-admin-binding --clusterrole cluster-admin --user your@google.email
-
-Prepare & Deploy Cilium
-=======================
+    NATIVE_CIDR="$(gcloud container clusters describe $CLUSTER_NAME --zone $CLUSTER_ZONE --format 'value(clusterIpv4Cidr)')"
+    echo $NATIVE_CIDR
 
 .. include:: k8s-install-download-release.rst
 
 Deploy Cilium release via Helm:
 
 If you are ready to restart existing pods when initializing the node, you can
-also pass the ``--set global.restartPods`` flag to the ``helm`` command
+also pass the ``--set nodeinit.restartPods=true`` flag to the ``helm`` command
 below. This will ensure all pods are managed by Cilium.
 
 .. parsed-literal::
@@ -75,19 +86,22 @@ below. This will ensure all pods are managed by Cilium.
     kubectl create namespace cilium
     helm install cilium |CHART_RELEASE| \\
       --namespace cilium \\
-      --set global.nodeinit.enabled=true \\
+      --set nodeinit.enabled=true \\
       --set nodeinit.reconfigureKubelet=true \\
       --set nodeinit.removeCbrBridge=true \\
-      --set global.cni.binPath=/home/kubernetes/bin
+      --set cni.binPath=/home/kubernetes/bin \\
+      --set gke.enabled=true \\
+      --set ipam.mode=kubernetes \\
+      --set nativeRoutingCIDR=$NATIVE_CIDR
 
 The NodeInit DaemonSet is required to prepare the GKE nodes as nodes are added
 to the cluster. The NodeInit DaemonSet will perform the following actions:
 
 * Reconfigure kubelet to run in CNI mode
-* Mount the BPF filesystem
+* Mount the eBPF filesystem
 
 .. include:: k8s-install-restart-pods.rst
 .. include:: k8s-install-gke-validate.rst
-.. include:: hubble-install.rst
-.. include:: getting-started-next-steps.rst
+.. include:: namespace-cilium.rst
+.. include:: hubble-enable.rst
 

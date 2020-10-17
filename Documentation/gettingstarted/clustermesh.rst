@@ -29,8 +29,11 @@ Prerequisites
 * All nodes must have a unique IP address assigned them. Node IPs of clusters
   being connected together may not conflict with each other.
 
-* Cilium must be configured to use etcd as the kvstore. Consul is not supported
-  by cluster mesh at this point.
+* Cilium must be configured to use etcd as the kvstore, along with the identity
+  allocation mode (``identityAllocationMode``). With the identity
+  allocation mode set to ``kvstore``, this allows direct etcd connections,
+  identity propagation across the clusters, and enables cross-cluster policy
+  functionality. Consul is not currently supported with cluster mesh.
 
 * It is highly recommended to use a TLS protected etcd cluster with Cilium. The
   server certificate of etcd must whitelist the host name ``*.mesh.cilium.io``.
@@ -70,9 +73,11 @@ Repeat this step for each cluster.
 
 .. note::
 
-   This can also be done by passing ``--set global.cluster.id=<id>`` and
-   ``--set global.cluster.name=<name>`` to ``helm install`` when installing or
+   This can also be done by passing ``--set cluster.id=<id>`` and
+   ``--set cluster.name=<name>`` to ``helm install`` when installing or
    updating Cilium.
+
+.. _gs_clustermesh_expose_etcd:
 
 Expose the Cilium etcd to other clusters
 ========================================
@@ -291,7 +296,7 @@ this command inside any Cilium pod in any cluster:
 
 .. code:: bash
 
-    $ kubectl -n kube-system exec -ti cilium-g6btl cilium node list
+    $ kubectl -n kube-system exec -ti cilium-g6btl -- cilium node list
     Name                                                   IPv4 Address    Endpoint CIDR   IPv6 Address   Endpoint CIDR
     cluster5/ip-172-0-117-60.us-west-2.compute.internal    172.0.117.60    10.2.2.0/24     <nil>          f00d::a02:200:0:0/112
     cluster5/ip-172-0-186-231.us-west-2.compute.internal   172.0.186.231   10.2.3.0/24     <nil>          f00d::a02:300:0:0/112
@@ -304,7 +309,7 @@ this command inside any Cilium pod in any cluster:
 
 .. code:: bash
 
-    $ kubectl exec -ti pod-cluster5-xxx curl <pod-ip-cluster7>
+    $ kubectl exec -ti pod-cluster5-xxx -- curl <pod-ip-cluster7>
     [...]
 
 Load-balancing with Global Services
@@ -329,6 +334,34 @@ Cilium will automatically perform load-balancing to pods in both clusters.
      - port: 80
      selector:
        name: rebel-base
+
+Load-balancing only to a remote cluster
+#######################################
+
+By default, a Global Service will load-balance across backends in multiple clusters.
+This implicitly configures ``io.cilium/shared-service: "true"``. To prevent service
+backends from being shared to other clusters, and to ensure that the service
+will only load-balance to backends in remote clusters, this option should be
+disabled.
+
+Below example will expose remote endpoint without sharing local endpoints.
+
+.. code-block:: yaml
+
+   apiVersion: v1
+   kind: Service
+   metadata:
+     name: rebel-base
+     annotations:
+       io.cilium/global-service: "true"
+       io.cilium/shared-service: "false"
+   spec:
+     type: ClusterIP
+     ports:
+     - port: 80
+     selector:
+       name: rebel-base
+
 
 Deploying a simple example service
 ==================================
@@ -375,8 +408,8 @@ the ``--cluster-name`` agent option or ``cluster-name`` ConfigMap option.
     kind: CiliumNetworkPolicy
     metadata:
       name: "allow-cross-cluster"
-      description: "Allow x-wing in cluster1 to contact rebel-base in cluster2"
     spec:
+      description: "Allow x-wing in cluster1 to contact rebel-base in cluster2"
       endpointSelector:
         matchLabels:
           name: x-wing
@@ -387,6 +420,19 @@ the ``--cluster-name`` agent option or ``cluster-name`` ConfigMap option.
             name: rebel-base
             io.cilium.k8s.policy.cluster: cluster2
 
+Setting up Hubble
+#################
+
+In a ClusterMesh context with Hubble configured in **distributed mode**,
+:ref:`hubble_relay` provides cross-cluster visibility without any particular
+configuration.
+
+When mutual TLS (mTLS) is enabled (default in **distributed mode**), TLS
+certificates for Hubble and Hubble Relay need to be signed by the same
+Certificate Authority (CA) for both clusters. This can be achieved by disabling
+automatic TLS certificate generation and manually providing certificates as
+instructed in :ref:`hubble_configure_tls_certs`.
+
 Troubleshooting
 ###############
 
@@ -395,7 +441,7 @@ Use the following list of steps to troubleshoot issues with ClusterMesh:
 Generic
 =======
 
- #. Validate that the ``cilium-xxx`` as well as the ``cilium-operator-xxx` pods
+ #. Validate that the ``cilium-xxx`` as well as the ``cilium-operator-xxx`` pods
     are healthy and ready. It is important that the ``cilium-operator`` is
     healthy as well as it is responsible for synchronizing state from the local
     cluster into the kvstore. If this fails, check the logs of these pods to
@@ -427,7 +473,7 @@ Control Plane Connectivity
       consisting of the IP to reach the remote etcd as well as the required
       certificates to connect to that etcd.
 
-    * Run a ``kubectl exec -ti [...] bash`` in one of the Cilium pods and check
+    * Run a ``kubectl exec -ti [...] -- bash`` in one of the Cilium pods and check
       the contents of the directory ``/var/lib/cilium/clustermesh/``. It must
       contain a configuration file for each remote cluster along with all the
       required SSL certificates and keys. The filenames must match the cluster
@@ -544,7 +590,7 @@ State Propagation
     endpoints from all clusters. Run ``cilium service list`` in any Cilium pod
     and validate that the backend IPs consist of pod IPs from all clusters
     running relevant backends. You can further validate the correct datapath
-    plumbing by running ``cilium bpf lb list`` to inspect the state of the BPF
+    plumbing by running ``cilium bpf lb list`` to inspect the state of the eBPF
     maps.
 
     If this fails:

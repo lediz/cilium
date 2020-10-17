@@ -35,7 +35,8 @@ var (
 	SSHMetaLogs = ginkgoext.NewWriter(new(Buffer))
 )
 
-// SSHMeta contains metadata to SSH into a remote location to run tests
+// SSHMeta contains metadata to SSH into a remote location to run tests,
+// implements Executor interface
 type SSHMeta struct {
 	sshClient *SSHClient
 	env       []string
@@ -51,6 +52,11 @@ func CreateSSHMeta(host string, port int, user string) *SSHMeta {
 	return &SSHMeta{
 		sshClient: GetSSHClient(host, port, user),
 	}
+}
+
+// IsLocal returns true if commands are executed on the Ginkgo host
+func (s *SSHMeta) IsLocal() bool {
+	return false
 }
 
 // Logger returns logger for SSHMeta
@@ -125,7 +131,6 @@ func (s *SSHMeta) setBasePath() {
 	}
 
 	s.basePath = filepath.Join(home, "go", CiliumPath)
-	return
 }
 
 // ExecuteContext executes the given `cmd` and writes the cmd's stdout and
@@ -229,8 +234,8 @@ func (s *SSHMeta) ExecContext(ctx context.Context, cmd string, options ...ExecOp
 		} else {
 			// Log other error types. They are likely from SSH or the network
 			log.WithError(err).Errorf("Error executing command '%s'", cmd)
-			res.err = err
 		}
+		res.err = err
 	}
 
 	res.SendToLog(ops.SkipLog)
@@ -306,6 +311,9 @@ func (s *SSHMeta) ExecInBackground(ctx context.Context, cmd string, options ...E
 					res.success = true
 				}
 			}
+			if !res.success {
+				res.err = err
+			}
 		} else {
 			res.success = true
 			res.exitcode = 0
@@ -315,4 +323,21 @@ func (s *SSHMeta) ExecInBackground(ctx context.Context, cmd string, options ...E
 	}(res)
 
 	return res
+}
+
+// RenderTemplateToFile renders a text/template string into a target filename
+// with specific persmisions. Returns an error if the template cannot be
+// validated or the file cannot be created.
+func (s *SSHMeta) RenderTemplateToFile(filename string, tmplt string, perm os.FileMode) error {
+	content, err := RenderTemplate(tmplt)
+	if err != nil {
+		return err
+	}
+
+	cmd := fmt.Sprintf("install -m %o <(echo '%s') %s\n", perm, content, filepath.Join(s.basePath, filename))
+	res := s.Exec(cmd)
+	if !res.WasSuccessful() {
+		return fmt.Errorf("%s", res.CombineOutput())
+	}
+	return nil
 }

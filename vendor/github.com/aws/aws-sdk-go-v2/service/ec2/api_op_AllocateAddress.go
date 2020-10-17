@@ -21,9 +21,11 @@ type AllocateAddressInput struct {
 	// address from the address pool.
 	CustomerOwnedIpv4Pool *string `type:"string"`
 
-	// Set to vpc to allocate the address for use with instances in a VPC.
+	// Indicates whether the Elastic IP address is for use with instances in a VPC
+	// or instances in EC2-Classic.
 	//
-	// Default: The address is for use with instances in EC2-Classic.
+	// Default: If the Region supports EC2-Classic, the default is standard. Otherwise,
+	// the default is vpc.
 	Domain DomainType `type:"string" enum:"true"`
 
 	// Checks whether you have the required permissions for the action, without
@@ -35,7 +37,11 @@ type AllocateAddressInput struct {
 	// The location from which the IP address is advertised. Use this parameter
 	// to limit the address to this location.
 	//
-	// Use DescribeVpcs (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeVpcs.html)
+	// A network border group is a unique set of Availability Zones or Local Zones
+	// from where AWS advertises IP addresses and limits the addresses to the group.
+	// IP addresses cannot move between network border groups.
+	//
+	// Use DescribeAvailabilityZones (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeAvailabilityZones.html)
 	// to view the network border groups.
 	//
 	// You cannot use a network border group with EC2 Classic. If you attempt this
@@ -67,8 +73,8 @@ type AllocateAddressOutput struct {
 	// The ID of the customer-owned address pool.
 	CustomerOwnedIpv4Pool *string `locationName:"customerOwnedIpv4Pool" type:"string"`
 
-	// Indicates whether this Elastic IP address is for use with instances in EC2-Classic
-	// (standard) or instances in a VPC (vpc).
+	// Indicates whether the Elastic IP address is for use with instances in a VPC
+	// (vpc) or instances in EC2-Classic (standard).
 	Domain DomainType `locationName:"domain" type:"string" enum:"true"`
 
 	// The location from which the IP address is advertised.
@@ -136,6 +142,7 @@ func (c *Client) AllocateAddressRequest(input *AllocateAddressInput) AllocateAdd
 	}
 
 	req := c.newRequest(op, input, &AllocateAddressOutput{})
+
 	return AllocateAddressRequest{Request: req, Input: input, Copy: c.AllocateAddressRequest}
 }
 

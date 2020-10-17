@@ -24,7 +24,7 @@ import (
 
 	. "github.com/cilium/cilium/test/ginkgo-ext"
 	"github.com/cilium/cilium/test/helpers"
-	"github.com/cilium/cilium/test/k8sT/manifests/externalIPs"
+	external_ips "github.com/cilium/cilium/test/k8sT/manifests/externalIPs"
 
 	. "github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
@@ -34,7 +34,12 @@ const (
 	namespaceTest = "external-ips-test"
 )
 
-var _ = Describe("K8sKubeProxyFreeMatrix tests", func() {
+func skipSuite(name string, t func()) bool {
+	return false
+}
+
+// Replace "skipSuite" with "Describe" to enable the suite.
+var _ = skipSuite("K8sKubeProxyFreeMatrix tests", func() {
 	var (
 		kubectl             *helpers.Kubectl
 		ciliumFilename      string
@@ -93,10 +98,11 @@ var _ = Describe("K8sKubeProxyFreeMatrix tests", func() {
 	}
 
 	BeforeAll(func() {
-		if !helpers.RunsOnNetNext() {
+		if !helpers.RunsOnNetNextOr419Kernel() {
 			return
 		}
 		kubectl = helpers.CreateKubectl(helpers.K8s1VMName(), logger)
+
 		ciliumFilename = helpers.TimestampFilename("cilium.yaml")
 		DeployCiliumAndDNS(kubectl, ciliumFilename)
 
@@ -172,21 +178,19 @@ var _ = Describe("K8sKubeProxyFreeMatrix tests", func() {
 	})
 
 	AfterFailed(func() {
-		if !helpers.RunsOnNetNext() {
+		if !helpers.RunsOnNetNextOr419Kernel() {
 			return
 		}
-		kubectl.CiliumReport(helpers.CiliumNamespace,
-			"cilium service list",
-			"cilium endpoint list")
+		kubectl.CiliumReport("cilium service list", "cilium endpoint list")
 	})
 
 	AfterAll(func() {
-		if !helpers.RunsOnNetNext() {
+		if !helpers.RunsOnNetNextOr419Kernel() {
 			return
 		}
+
+		UninstallCiliumFromManifest(kubectl, ciliumFilename)
 		_ = kubectl.NamespaceDelete(namespaceTest)
-		kubectl.DeleteCiliumDS()
-		ExpectAllPodsTerminated(kubectl)
 		kubectl.CloseSSHClient()
 	})
 
@@ -206,6 +210,7 @@ var _ = Describe("K8sKubeProxyFreeMatrix tests", func() {
 			case bytes.Contains(b, []byte("Connection refused")):
 				got = "connection refused"
 			case bytes.Contains(b, []byte("No route to host")),
+				bytes.Contains(b, []byte("Network unreachable")),
 				bytes.Contains(b, []byte("Host is unreachable")),
 				bytes.Contains(b, []byte("Connection timed out")):
 				got = "No route to host / connection timed out"
@@ -234,14 +239,15 @@ var _ = Describe("K8sKubeProxyFreeMatrix tests", func() {
 	}
 
 	SkipContextIf(
-		func() bool { return helpers.DoesNotRunOnNetNext() },
+		func() bool { return helpers.DoesNotRunOnNetNextOr419Kernel() },
 		"DirectRouting", func() {
 			BeforeAll(func() {
 				deployCilium(map[string]string{
-					"global.tunnel":               "disabled",
-					"global.autoDirectNodeRoutes": "true",
-					"global.nodePort.device":      external_ips.PublicInterfaceName,
-					"global.nodePort.enabled":     "true",
+					"tunnel":               "disabled",
+					"autoDirectNodeRoutes": "true",
+					"devices":              external_ips.PublicInterfaceName,
+					"nodePort.enabled":     "true",
+					"bpf.masquerade":       "false",
 				})
 			})
 			DescribeTable("From pod running on node-1 to services being backed by a pod running on node-1",
@@ -279,13 +285,14 @@ var _ = Describe("K8sKubeProxyFreeMatrix tests", func() {
 	)
 
 	SkipContextIf(
-		func() bool { return helpers.DoesNotRunOnNetNext() },
+		func() bool { return helpers.DoesNotRunOnNetNextOr419Kernel() },
 		"VxLANMode", func() {
 			BeforeAll(func() {
 				deployCilium(map[string]string{
-					"global.tunnel":           "vxlan",
-					"global.nodePort.device":  external_ips.PublicInterfaceName,
-					"global.nodePort.enabled": "true",
+					"tunnel":           "vxlan",
+					"devices":          external_ips.PublicInterfaceName,
+					"nodePort.enabled": "true",
+					"bpf.masquerade":   "false",
 				})
 			})
 			DescribeTable("From pod running on node-1 to services being backed by a pod running on node-1",

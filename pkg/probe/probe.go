@@ -15,11 +15,14 @@
 package probe
 
 import (
+	"errors"
 	"fmt"
-	"syscall"
+	"sync"
 	"unsafe"
 
 	"github.com/cilium/cilium/pkg/bpf"
+
+	"golang.org/x/sys/unix"
 )
 
 type probeKey struct {
@@ -30,6 +33,11 @@ type probeKey struct {
 type probeValue struct {
 	Value uint32
 }
+
+var (
+	haveFullLPMOnce sync.Once
+	haveFullLPM     bool
+)
 
 func (p *probeKey) String() string             { return fmt.Sprintf("key=%d", p.Key) }
 func (p *probeKey) GetKeyPtr() unsafe.Pointer  { return unsafe.Pointer(p) }
@@ -43,35 +51,56 @@ func (p *probeValue) DeepCopyMapValue() bpf.MapValue { return &probeValue{p.Valu
 // HaveFullLPM tests whether kernel supports fully functioning BPF LPM map
 // with proper bpf.GetNextKey() traversal. Needs 4.16 or higher.
 func HaveFullLPM() bool {
-	m := bpf.NewMap("cilium_test", bpf.MapTypeLPMTrie,
-		&probeKey{}, int(unsafe.Sizeof(probeKey{})),
-		&probeValue{}, int(unsafe.Sizeof(probeValue{})),
-		1, bpf.BPF_F_NO_PREALLOC, 0, bpf.ConvertKeyValue).WithCache()
-	_, err := m.OpenOrCreateUnpinned()
-	defer m.Close()
-	if err != nil {
-		return false
-	}
-	err = bpf.UpdateElement(m.GetFd(), unsafe.Pointer(&probeKey{}),
-		unsafe.Pointer(&probeValue{}), bpf.BPF_ANY)
-	if err != nil {
-		return false
-	}
-	err = bpf.GetNextKey(m.GetFd(), nil, unsafe.Pointer(&probeKey{}))
-	if err != nil {
-		return false
-	}
-	return true
+	haveFullLPMOnce.Do(func() {
+
+		var oldLim unix.Rlimit
+
+		tmpLim := unix.Rlimit{
+			Cur: unix.RLIM_INFINITY,
+			Max: unix.RLIM_INFINITY,
+		}
+		if err := unix.Getrlimit(unix.RLIMIT_MEMLOCK, &oldLim); err != nil {
+			return
+		}
+		// Otherwise opening the map might fail with EPERM
+		if err := unix.Setrlimit(unix.RLIMIT_MEMLOCK, &tmpLim); err != nil {
+			return
+		}
+		defer unix.Setrlimit(unix.RLIMIT_MEMLOCK, &oldLim)
+
+		m := bpf.NewMap("cilium_test", bpf.MapTypeLPMTrie,
+			&probeKey{}, int(unsafe.Sizeof(probeKey{})),
+			&probeValue{}, int(unsafe.Sizeof(probeValue{})),
+			1, bpf.BPF_F_NO_PREALLOC, 0, bpf.ConvertKeyValue).WithCache()
+		err := m.CreateUnpinned()
+		defer m.Close()
+		if err != nil {
+			return
+		}
+		err = bpf.UpdateElement(m.GetFd(), unsafe.Pointer(&probeKey{}),
+			unsafe.Pointer(&probeValue{}), bpf.BPF_ANY)
+		if err != nil {
+			return
+		}
+		err = bpf.GetNextKey(m.GetFd(), nil, unsafe.Pointer(&probeKey{}))
+		if err != nil {
+			return
+		}
+
+		haveFullLPM = true
+	})
+
+	return haveFullLPM
 }
 
 // HaveIPv6Support tests whether kernel can open an IPv6 socket. This will
 // also implicitly auto-load IPv6 kernel module if available and not yet
 // loaded.
 func HaveIPv6Support() bool {
-	fd, err := syscall.Socket(syscall.AF_INET6, syscall.SOCK_STREAM, 0)
-	if err == syscall.EAFNOSUPPORT || err == syscall.EPROTONOSUPPORT {
+	fd, err := unix.Socket(unix.AF_INET6, unix.SOCK_STREAM, 0)
+	if errors.Is(err, unix.EAFNOSUPPORT) || errors.Is(err, unix.EPROTONOSUPPORT) {
 		return false
 	}
-	syscall.Close(fd)
+	unix.Close(fd)
 	return true
 }

@@ -1,4 +1,4 @@
-// Copyright 2019 Authors of Cilium
+// Copyright 2019-2020 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,9 +18,9 @@ package api
 
 import (
 	"github.com/cilium/cilium/pkg/checker"
+	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
 
 	. "gopkg.in/check.v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func (s *PolicyAPITestSuite) TestIsLabelBasedIngress(c *C) {
@@ -41,11 +41,13 @@ func (s *PolicyAPITestSuite) TestIsLabelBasedIngress(c *C) {
 			setupArgs: func() args {
 				return args{
 					eg: &IngressRule{
-						FromEndpoints: []EndpointSelector{
-							{
-								LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
-									"test": "true",
-								},
+						IngressCommonRule: IngressCommonRule{
+							FromEndpoints: []EndpointSelector{
+								{
+									LabelSelector: &slim_metav1.LabelSelector{MatchLabels: map[string]string{
+										"test": "true",
+									},
+									},
 								},
 							},
 						},
@@ -63,7 +65,9 @@ func (s *PolicyAPITestSuite) TestIsLabelBasedIngress(c *C) {
 			setupArgs: func() args {
 				return args{
 					&IngressRule{
-						FromCIDR: CIDRSlice{"192.0.0.0/3"},
+						IngressCommonRule: IngressCommonRule{
+							FromCIDR: CIDRSlice{"192.0.0.0/3"},
+						},
 					},
 				}
 			},
@@ -78,9 +82,11 @@ func (s *PolicyAPITestSuite) TestIsLabelBasedIngress(c *C) {
 			setupArgs: func() args {
 				return args{
 					&IngressRule{
-						FromCIDRSet: CIDRRuleSlice{
-							{
-								Cidr: "192.0.0.0/3",
+						IngressCommonRule: IngressCommonRule{
+							FromCIDRSet: CIDRRuleSlice{
+								{
+									Cidr: "192.0.0.0/3",
+								},
 							},
 						},
 					},
@@ -97,11 +103,13 @@ func (s *PolicyAPITestSuite) TestIsLabelBasedIngress(c *C) {
 			setupArgs: func() args {
 				return args{
 					&IngressRule{
-						FromRequires: []EndpointSelector{
-							{
-								LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
-									"test": "true",
-								},
+						IngressCommonRule: IngressCommonRule{
+							FromRequires: []EndpointSelector{
+								{
+									LabelSelector: &slim_metav1.LabelSelector{MatchLabels: map[string]string{
+										"test": "true",
+									},
+									},
 								},
 							},
 						},
@@ -119,8 +127,10 @@ func (s *PolicyAPITestSuite) TestIsLabelBasedIngress(c *C) {
 			setupArgs: func() args {
 				return args{
 					&IngressRule{
-						FromEntities: EntitySlice{
-							EntityHost,
+						IngressCommonRule: IngressCommonRule{
+							FromEntities: EntitySlice{
+								EntityHost,
+							},
 						},
 					},
 				}
@@ -141,6 +151,30 @@ func (s *PolicyAPITestSuite) TestIsLabelBasedIngress(c *C) {
 								Ports: []PortProtocol{
 									{
 										Port:     "80",
+										Protocol: ProtoTCP,
+									},
+								},
+							},
+						},
+					},
+				}
+			},
+			setupWanted: func() wanted {
+				return wanted{
+					isLabelBased: true,
+				}
+			},
+		},
+		{
+			name: "rule-with-named-port",
+			setupArgs: func() args {
+				return args{
+					&IngressRule{
+						ToPorts: []PortRule{
+							{
+								Ports: []PortProtocol{
+									{
+										Port:     "port-80",
 										Protocol: ProtoTCP,
 									},
 								},

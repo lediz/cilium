@@ -1,4 +1,4 @@
-// Copyright 2016-2019 Authors of Cilium
+// Copyright 2016-2020 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,11 +19,25 @@ import (
 	"net"
 	"unsafe"
 
-	"github.com/cilium/cilium/common/types"
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/byteorder"
 	"github.com/cilium/cilium/pkg/loadbalancer"
+	"github.com/cilium/cilium/pkg/types"
 	"github.com/cilium/cilium/pkg/u8proto"
+)
+
+const (
+	// SockRevNat4MapName is the BPF map name.
+	SockRevNat4MapName = "cilium_lb4_reverse_sk"
+
+	// SockRevNat4MapSize is the maximum number of entries in the BPF map.
+	SockRevNat4MapSize = 256 * 1024
+)
+
+var (
+	// MaxSockRevNat4MapEntries is the maximum number of entries in the BPF map.
+	// It is set by InitMapInfo(), but unit tests use the initial value below.
+	MaxSockRevNat4MapEntries = SockRevNat4MapSize
 )
 
 var (
@@ -120,23 +134,13 @@ func (v *RevNat4Value) ToNetwork() RevNatValue {
 }
 
 func (v *RevNat4Value) String() string {
-	return fmt.Sprintf("%s:%d", v.Address, v.Port)
+	return net.JoinHostPort(v.Address.String(), fmt.Sprintf("%d", v.Port))
 }
 
-func NewRevNat4Value(ip net.IP, port uint16) *RevNat4Value {
-	revNat := RevNat4Value{
-		Port: port,
-	}
-
-	copy(revNat.Address[:], ip.To4())
-
-	return &revNat
-}
-
-type pad3uint8 [3]uint8
+type pad2uint8 [2]uint8
 
 // DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
-func (in *pad3uint8) DeepCopyInto(out *pad3uint8) {
+func (in *pad2uint8) DeepCopyInto(out *pad2uint8) {
 	copy(out[:], in[:])
 	return
 }
@@ -145,18 +149,20 @@ func (in *pad3uint8) DeepCopyInto(out *pad3uint8) {
 // +k8s:deepcopy-gen=true
 // +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapKey
 type Service4Key struct {
-	Address types.IPv4 `align:"address"`
-	Port    uint16     `align:"dport"`
-	Slave   uint16     `align:"slave"`
-	Proto   uint8      `align:"proto"`
-	Pad     pad3uint8  `align:"pad"`
+	Address     types.IPv4 `align:"address"`
+	Port        uint16     `align:"dport"`
+	BackendSlot uint16     `align:"backend_slot"`
+	Proto       uint8      `align:"proto"`
+	Scope       uint8      `align:"scope"`
+	Pad         pad2uint8  `align:"pad"`
 }
 
-func NewService4Key(ip net.IP, port uint16, proto u8proto.U8proto, slave uint16) *Service4Key {
+func NewService4Key(ip net.IP, port uint16, proto u8proto.U8proto, scope uint8, slot uint16) *Service4Key {
 	key := Service4Key{
-		Port:  port,
-		Proto: uint8(proto),
-		Slave: slave,
+		Port:        port,
+		Proto:       uint8(proto),
+		Scope:       scope,
+		BackendSlot: slot,
 	}
 
 	copy(key.Address[:], ip.To4())
@@ -165,15 +171,22 @@ func NewService4Key(ip net.IP, port uint16, proto u8proto.U8proto, slave uint16)
 }
 
 func (k *Service4Key) String() string {
-	return fmt.Sprintf("%s:%d", k.Address, k.Port)
+	addr := net.JoinHostPort(k.Address.String(), fmt.Sprintf("%d", k.Port))
+	if k.Scope == loadbalancer.ScopeInternal {
+		addr += "/i"
+	}
+	return addr
 }
 
 func (k *Service4Key) GetKeyPtr() unsafe.Pointer { return unsafe.Pointer(k) }
 func (k *Service4Key) NewValue() bpf.MapValue    { return &Service4Value{} }
 func (k *Service4Key) IsIPv6() bool              { return false }
+func (k *Service4Key) IsSurrogate() bool         { return k.GetAddress().IsUnspecified() }
 func (k *Service4Key) Map() *bpf.Map             { return Service4MapV2 }
-func (k *Service4Key) SetSlave(slave int)        { k.Slave = uint16(slave) }
-func (k *Service4Key) GetSlave() int             { return int(k.Slave) }
+func (k *Service4Key) SetBackendSlot(slot int)   { k.BackendSlot = uint16(slot) }
+func (k *Service4Key) GetBackendSlot() int       { return int(k.BackendSlot) }
+func (k *Service4Key) SetScope(scope uint8)      { k.Scope = scope }
+func (k *Service4Key) GetScope() uint8           { return k.Scope }
 func (k *Service4Key) GetAddress() net.IP        { return k.Address.IP() }
 func (k *Service4Key) GetPort() uint16           { return k.Port }
 func (k *Service4Key) MapDelete() error          { return k.Map().Delete(k.ToNetwork()) }
@@ -191,25 +204,24 @@ func (k *Service4Key) ToNetwork() ServiceKey {
 	return &n
 }
 
+type pad3uint8 [3]uint8
+
+// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
+func (in *pad3uint8) DeepCopyInto(out *pad3uint8) {
+	copy(out[:], in[:])
+	return
+}
+
 // Service4Value must match 'struct lb4_service_v2' in "bpf/lib/common.h".
 // +k8s:deepcopy-gen=true
 // +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapValue
 type Service4Value struct {
-	BackendID uint32 `align:"backend_id"`
-	Count     uint16 `align:"count"`
-	RevNat    uint16 `align:"rev_nat_index"`
-	Flags     uint8
-	Pad       pad3uint8 `align:"pad"`
-}
-
-func NewService4Value(count uint16, backendID loadbalancer.BackendID, revNat uint16) *Service4Value {
-	svc := Service4Value{
-		BackendID: uint32(backendID),
-		Count:     count,
-		RevNat:    revNat,
-	}
-
-	return &svc
+	BackendID uint32    `align:"backend_id"`
+	Count     uint16    `align:"count"`
+	RevNat    uint16    `align:"rev_nat_index"`
+	Flags     uint8     `align:"flags"`
+	Flags2    uint8     `align:"flags2"`
+	Pad       pad2uint8 `align:"pad"`
 }
 
 func (s *Service4Value) String() string {
@@ -223,8 +235,20 @@ func (s *Service4Value) GetCount() int        { return int(s.Count) }
 func (s *Service4Value) SetRevNat(id int)     { s.RevNat = uint16(id) }
 func (s *Service4Value) GetRevNat() int       { return int(s.RevNat) }
 func (s *Service4Value) RevNatKey() RevNatKey { return &RevNat4Key{s.RevNat} }
-func (s *Service4Value) SetFlags(flags uint8) { s.Flags = flags }
-func (s *Service4Value) GetFlags() uint8      { return s.Flags }
+func (s *Service4Value) SetFlags(flags uint16) {
+	s.Flags = uint8(flags & 0xff)
+	s.Flags2 = uint8(flags >> 8)
+}
+
+func (s *Service4Value) GetFlags() uint16 {
+	return (uint16(s.Flags2) << 8) | uint16(s.Flags)
+}
+
+func (s *Service4Value) SetSessionAffinityTimeoutSec(t uint32) {
+	// Go doesn't support union types, so we use BackendID to access the
+	// lb4_service.affinity_timeout field
+	s.BackendID = t
+}
 
 func (s *Service4Value) SetBackendID(id loadbalancer.BackendID) {
 	s.BackendID = uint32(id)
@@ -316,3 +340,60 @@ func NewBackend4(id loadbalancer.BackendID, ip net.IP, port uint16, proto u8prot
 func (b *Backend4) Map() *bpf.Map          { return Backend4Map }
 func (b *Backend4) GetKey() BackendKey     { return b.Key }
 func (b *Backend4) GetValue() BackendValue { return b.Value }
+
+// SockRevNat4Key is the tuple with address, port and cookie used as key in
+// the reverse NAT sock map.
+// +k8s:deepcopy-gen=true
+// +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapKey
+type SockRevNat4Key struct {
+	cookie  uint64     `align:"cookie"`
+	address types.IPv4 `align:"address"`
+	port    int16      `align:"port"`
+	pad     int16      `align:"pad"`
+}
+
+// SockRevNat4Value is an entry in the reverse NAT sock map.
+// +k8s:deepcopy-gen=true
+// +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapValue
+type SockRevNat4Value struct {
+	address     types.IPv4 `align:"address"`
+	port        int16      `align:"port"`
+	revNatIndex uint16     `align:"rev_nat_index"`
+}
+
+// GetKeyPtr returns the unsafe pointer to the BPF key
+func (k *SockRevNat4Key) GetKeyPtr() unsafe.Pointer { return unsafe.Pointer(k) }
+
+// GetValuePtr returns the unsafe pointer to the BPF value
+func (v *SockRevNat4Value) GetValuePtr() unsafe.Pointer { return unsafe.Pointer(v) }
+
+// String converts the key into a human readable string format.
+func (k *SockRevNat4Key) String() string {
+	return fmt.Sprintf("[%s]:%d, %d", k.address, k.port, k.cookie)
+}
+
+// String converts the value into a human readable string format.
+func (v *SockRevNat4Value) String() string {
+	return fmt.Sprintf("[%s]:%d, %d", v.address, v.port, v.revNatIndex)
+}
+
+// NewValue returns a new empty instance of the structure representing the BPF
+// map value.
+func (k SockRevNat4Key) NewValue() bpf.MapValue { return &SockRevNat4Value{} }
+
+// CreateSockRevNat4Map creates the reverse NAT sock map.
+func CreateSockRevNat4Map() error {
+	sockRevNat4Map := bpf.NewMap(SockRevNat4MapName,
+		bpf.MapTypeLRUHash,
+		&SockRevNat4Key{},
+		int(unsafe.Sizeof(SockRevNat4Key{})),
+		&SockRevNat4Value{},
+		int(unsafe.Sizeof(SockRevNat4Value{})),
+		MaxSockRevNat4MapEntries,
+		0,
+		0,
+		bpf.ConvertKeyValue,
+	)
+	_, err := sockRevNat4Map.Create()
+	return err
+}

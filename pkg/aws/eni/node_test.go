@@ -1,4 +1,4 @@
-// Copyright 2019 Authors of Cilium
+// Copyright 2020 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,56 +20,25 @@ import (
 	"gopkg.in/check.v1"
 )
 
-type testNeededDef struct {
-	available   int
-	used        int
-	preallocate int
-	minallocate int
-	result      int
-}
+func (e *ENISuite) TestGetMaximumAllocatableIPv4(c *check.C) {
+	n := &Node{}
 
-type testExcessDef struct {
-	available         int
-	used              int
-	preallocate       int
-	minallocate       int
-	maxabovewatermark int
-	result            int
-}
+	// With no k8sObj defined, it should return 0
+	c.Assert(n.GetMaximumAllocatableIPv4(), check.Equals, 0)
 
-var neededDef = []testNeededDef{
-	{0, 0, 0, 16, 16},
-	{0, 0, 8, 16, 16},
-	{0, 0, 16, 8, 16},
-	{0, 0, 16, 0, 16},
-	{8, 0, 0, 16, 8},
-	{8, 4, 8, 0, 4},
-	{8, 4, 8, 8, 4},
-}
+	// With instance-type = m5.large and first-interface-index = 0, we should be able to allocate up to 30 addresses
+	n.k8sObj = newCiliumNode("node", "i-testnode", "m5.large", "eu-west-1", "test-vpc", 0, 0, 0, 0)
+	c.Assert(n.GetMaximumAllocatableIPv4(), check.Equals, 30)
 
-var excessDef = []testExcessDef{
-	{0, 0, 0, 16, 0, 0},
-	{15, 0, 8, 16, 8, 0},
-	{17, 0, 8, 16, 0, 9}, // 17 used, 8 pre-allocate, 16 min-allocate => 1 excess
-	{20, 0, 8, 16, 4, 0}, // 20 used, 8 pre-allocate, 16 min-allocate, 4 max-above-watermark => 0 excess
-	{21, 0, 8, 0, 4, 9},  // 21 used, 8 pre-allocate, 4 max-above-watermark => 9 excess
-	{20, 0, 8, 20, 8, 0},
-	{16, 1, 8, 16, 8, 0},
-	{20, 4, 8, 17, 8, 0},
-	{20, 4, 0, 0, 0, 8},
-	{20, 4, 0, 0, 8, 0},
-}
+	// With instance-type = m5.large and first-interface-index = 1, we should be able to allocate up to 20 addresses
+	n.k8sObj = newCiliumNode("node", "i-testnode", "m5.large", "eu-west-1", "test-vpc", 1, 0, 0, 0)
+	c.Assert(n.GetMaximumAllocatableIPv4(), check.Equals, 20)
 
-func (e *ENISuite) TestCalculateNeededIPs(c *check.C) {
-	for _, d := range neededDef {
-		result := calculateNeededIPs(d.available, d.used, d.preallocate, d.minallocate)
-		c.Assert(result, check.Equals, d.result)
-	}
-}
+	// With instance-type = m5.large and first-interface-index = 4, we should return 0 as there is only 3 interfaces
+	n.k8sObj = newCiliumNode("node", "i-testnode", "m5.large", "eu-west-1", "test-vpc", 4, 0, 0, 0)
+	c.Assert(n.GetMaximumAllocatableIPv4(), check.Equals, 0)
 
-func (e *ENISuite) TestCalculateExcessIPs(c *check.C) {
-	for _, d := range excessDef {
-		result := calculateExcessIPs(d.available, d.used, d.preallocate, d.minallocate, d.maxabovewatermark)
-		c.Assert(result, check.Equals, d.result)
-	}
+	// With instance-type = foo we should return 0
+	n.k8sObj = newCiliumNode("node", "i-testnode", "foo", "eu-west-1", "test-vpc", 0, 0, 0, 0)
+	c.Assert(n.GetMaximumAllocatableIPv4(), check.Equals, 0)
 }

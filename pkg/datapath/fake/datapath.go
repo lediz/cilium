@@ -80,7 +80,7 @@ func (f *fakeDatapath) SupportsOriginalSourceAddr() bool {
 	return false
 }
 
-func (f *fakeDatapath) RemoveRules() {}
+func (f *fakeDatapath) RemoveRules(quiet bool) {}
 
 func (f *fakeDatapath) InstallRules(ifName string) error {
 	return nil
@@ -90,6 +90,10 @@ func (f *fakeDatapath) TransientRulesStart(ifName string) error {
 }
 func (f *fakeDatapath) TransientRulesEnd(quiet bool) {
 	return
+}
+
+func (m *fakeDatapath) GetProxyPort(name string) uint16 {
+	return 0
 }
 
 func (f *fakeDatapath) Loader() datapath.Loader {
@@ -128,7 +132,7 @@ func (f *fakeLoader) CallsMapPath(id uint16) string {
 }
 
 // Reinitialize does nothing.
-func (f *fakeLoader) Reinitialize(ctx context.Context, o datapath.BaseProgramOwner, deviceMTU int, iptMgr datapath.IptablesManager, p datapath.Proxy, r datapath.RouteReserver) error {
+func (f *fakeLoader) Reinitialize(ctx context.Context, o datapath.BaseProgramOwner, deviceMTU int, iptMgr datapath.IptablesManager, p datapath.Proxy) error {
 	return nil
 }
 

@@ -2,7 +2,7 @@
 
     WARNING: You are looking at unreleased Cilium documentation.
     Please use the official rendered version released here:
-    http://docs.cilium.io
+    https://docs.cilium.io
 
 .. _k8s_install_etcd_operator:
 
@@ -39,8 +39,8 @@ Deploy Cilium release via Helm:
 
    helm install cilium |CHART_RELEASE| \\
       --namespace kube-system \\
-      --set global.etcd.enabled=true \\
-      --set global.etcd.managed=true
+      --set etcd.enabled=true \\
+      --set etcd.managed=true
 
 
 Validate the Installation
@@ -98,9 +98,10 @@ Troubleshooting
 
    * ``kube-dns`` or ``coredns``
    * ``cilium-xxx``
+   * ``cilium-operator-xxx``
    * ``cilium-etcd-operator``
    * ``etcd-operator``
-   * ``etcd-xxx``
+   * ``cilium-etcd-xxx``
 
    All timeouts are configured that this will typically work out smoothly even
    if some of the pods restart once or twice. In case any of the above pods get
@@ -115,25 +116,50 @@ reverse lookup on a pod IP must map back to pod name. If you are using CoreDNS,
 check the CoreDNS ConfigMap and validate that ``in-addr.arpa`` and ``ip6.arpa``
 are listed as wildcards for the kubernetes block like this:
 
-::
+    .. tabs::
+        .. group-tab:: Kubernetes 1.16+
 
-    kubectl -n kube-system edit cm coredns
-    [...]
-    apiVersion: v1
-    data:
-      Corefile: |
-        .:53 {
-            errors
-            health
-            kubernetes cluster.local in-addr.arpa ip6.arpa {
-              pods insecure
-              upstream
-              fallthrough in-addr.arpa ip6.arpa
-            }
-            prometheus :9153
-            proxy . /etc/resolv.conf
-            cache 30
-        }
+            ::
+
+                kubectl -n kube-system edit cm coredns
+                [...]
+                apiVersion: v1
+                data:
+                  Corefile: |
+                    .:53 {
+                        errors
+                        health
+                        kubernetes cluster.local in-addr.arpa ip6.arpa {
+                          pods insecure
+                          upstream
+                          fallthrough in-addr.arpa ip6.arpa
+                        }
+                        prometheus :9153
+                        forward . /etc/resolv.conf
+                        cache 30
+                    }
+
+        .. group-tab:: Kubernetes < 1.16
+
+            ::
+
+                kubectl -n kube-system edit cm coredns
+                [...]
+                apiVersion: v1
+                data:
+                  Corefile: |
+                    .:53 {
+                        errors
+                        health
+                        kubernetes cluster.local in-addr.arpa ip6.arpa {
+                          pods insecure
+                          upstream
+                          fallthrough in-addr.arpa ip6.arpa
+                        }
+                        prometheus :9153
+                        proxy . /etc/resolv.conf
+                        cache 30
+                    }
 
 The contents can look different than the above. The specific configuration that
 matters is to make sure that ``in-addr.arpa`` and ``ip6.arpa`` are listed as
@@ -187,4 +213,4 @@ disadvantages which can become of relevance as you scale up your clusters:
   certain scale. The cilium-etcd-operator will not take any measures to provide
   fast disk access and performance will depend whatever is provided to the pods
   in your Kubernetes cluster. See `etcd Hardware recommendations
-  <https://coreos.com/etcd/docs/latest/op-guide/hardware.html>`_ for more details.
+  <https://etcd.io/docs/latest/op-guide/hardware/>`_ for more details.

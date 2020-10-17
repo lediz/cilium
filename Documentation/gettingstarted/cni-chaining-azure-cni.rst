@@ -2,7 +2,7 @@
 
     WARNING: You are looking at unreleased Cilium documentation.
     Please use the official rendered version released here:
-    http://docs.cilium.io
+    https://docs.cilium.io
 
 *********
 Azure CNI
@@ -11,7 +11,7 @@ Azure CNI
 This guide explains how to set up Cilium in combination with Azure CNI. In this
 hybrid mode, the Azure CNI plugin is responsible for setting up the virtual
 network devices as well as address allocation (IPAM). After the initial
-networking is setup, the Cilium CNI plugin is called to attach BPF programs to
+networking is setup, the Cilium CNI plugin is called to attach eBPF programs to
 the network devices set up by Azure CNI to enforce network policies, perform
 load-balancing, and encryption.
 
@@ -36,6 +36,6 @@ If you are unsure if a pod is managed by Cilium or not, run ``kubectl get cep``
 in the respective namespace and see if the pod is listed.
 
 .. include:: k8s-install-azure-cni-validate.rst
-.. include:: hubble-install.rst
-.. include:: getting-started-next-steps.rst
+.. include:: namespace-cilium.rst
+.. include:: hubble-enable.rst
 

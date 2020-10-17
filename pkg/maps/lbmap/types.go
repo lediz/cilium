@@ -18,6 +18,7 @@ import (
 	"net"
 
 	"github.com/cilium/cilium/pkg/bpf"
+	"github.com/cilium/cilium/pkg/cidr"
 	"github.com/cilium/cilium/pkg/loadbalancer"
 )
 
@@ -28,14 +29,23 @@ type ServiceKey interface {
 	// Return true if the key is of type IPv6
 	IsIPv6() bool
 
+	// IsSurrogate returns true on zero-address
+	IsSurrogate() bool
+
 	// Return the BPF map matching the key type
 	Map() *bpf.Map
 
-	// Set slave slot for the key
-	SetSlave(slave int)
+	// Set backend slot for the key
+	SetBackendSlot(slot int)
 
-	// Get slave slot of the key
-	GetSlave() int
+	// Get backend slot of the key
+	GetBackendSlot() int
+
+	// Set lookup scope for the key
+	SetScope(scope uint8)
+
+	// Get lookup scope for the key
+	GetScope() uint8
 
 	// Get frontend IP address
 	GetAddress() net.IP
@@ -70,10 +80,13 @@ type ServiceValue interface {
 	GetRevNat() int
 
 	// Set flags
-	SetFlags(uint8)
+	SetFlags(uint16)
 
 	// Get flags
-	GetFlags() uint8
+	GetFlags() uint16
+
+	// Set timeout for sessionAffinity=clientIP
+	SetSessionAffinityTimeoutSec(t uint32)
 
 	// Set backend identifier
 	SetBackendID(id loadbalancer.BackendID)
@@ -148,8 +161,14 @@ type RevNatValue interface {
 	ToNetwork() RevNatValue
 }
 
+// BackendIDByServiceIDSet is the type of a set for checking whether a backend
+// belongs to a given service
+type BackendIDByServiceIDSet map[uint16]map[uint16]struct{} // svc ID => backend ID
+
+type SourceRangeSetByServiceID map[uint16][]*cidr.CIDR // svc ID => src range CIDRs
+
 func svcFrontend(svcKey ServiceKey, svcValue ServiceValue) *loadbalancer.L3n4AddrID {
-	feL3n4Addr := loadbalancer.NewL3n4Addr(loadbalancer.NONE, svcKey.GetAddress(), svcKey.GetPort())
+	feL3n4Addr := loadbalancer.NewL3n4Addr(loadbalancer.NONE, svcKey.GetAddress(), svcKey.GetPort(), svcKey.GetScope())
 	feL3n4AddrID := &loadbalancer.L3n4AddrID{
 		L3n4Addr: *feL3n4Addr,
 		ID:       loadbalancer.ID(svcValue.GetRevNat()),

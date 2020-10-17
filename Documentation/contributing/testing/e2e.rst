@@ -1,8 +1,8 @@
 .. only:: not (epub or latex or html)
-  
+
     WARNING: You are looking at unreleased Cilium documentation.
     Please use the official rendered version released here:
-    http://docs.cilium.io
+    https://docs.cilium.io
 
 .. _testsuite:
 
@@ -12,7 +12,7 @@ End-To-End Testing Framework
 Introduction
 ~~~~~~~~~~~~
 
-Cilium uses `Ginkgo <https://onsi.github.io/ginkgo>`_ as a testing framework for
+Cilium uses `Ginkgo`_ as a testing framework for
 writing end-to-end tests which test Cilium all the way from the API level (e.g.
 importing policies, CLI) to the datapath (i.e, whether policy that is imported
 is enforced accordingly in the datapath).  The tests in the ``test`` directory
@@ -26,7 +26,7 @@ well as running `example tests
 Ginkgo workflow.
 
 These test scripts will invoke ``vagrant`` to create virtual machine(s) to
-run the tests. The tests make heavy use of the Ginkgo `focus <https://onsi.github.io/ginkgo/#focused-specs>`_ concept to
+run the tests. The tests make heavy use of the Ginkgo `focus`_ concept to
 determine which VMs are necessary to run particular tests. All test names
 *must* begin with one of the following prefixes:
 
@@ -34,6 +34,9 @@ determine which VMs are necessary to run particular tests. All test names
 * ``K8s``: Create a small multi-node kubernetes environment for testing
   features beyond a single host, and for testing kubernetes-specific features.
 * ``Nightly``: sets up a multinode Kubernetes cluster to run scale, performance, and chaos testing for Cilium.
+
+.. _Ginkgo: https://onsi.github.io/ginkgo/
+.. _focus: `Focused Specs`_
 
 Running End-To-End Tests
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -61,7 +64,7 @@ To run all of the runtime tests, execute the following command from the ``test``
 
 ::
 
-    ginkgo --focus="Runtime*" -noColor
+    ginkgo --focus="Runtime" -noColor
 
 Ginkgo searches for all tests in all subdirectories that are "named" beginning
 with the string "Runtime" and contain any characters after it. For instance,
@@ -69,7 +72,7 @@ here is an example showing what tests will be ran using Ginkgo's dryRun option:
 
 ::
 
-    $ ginkgo --focus="Runtime*" -noColor -v -dryRun
+    $ ginkgo --focus="Runtime" -noColor -v -dryRun
     Running Suite: runtime
     ======================
     Random Seed: 1516125117
@@ -110,7 +113,7 @@ To run all of the Kubernetes tests, run the following command from the ``test`` 
 
 ::
 
-    ginkgo --focus="K8s*" -noColor
+    ginkgo --focus="K8s" -noColor
 
 
 Similar to the Runtime test suite, Ginkgo searches for all tests in all
@@ -119,27 +122,25 @@ contain any characters after it.
 
 The Kubernetes tests support the following Kubernetes versions:
 
-* 1.8
-* 1.9
-* 1.10
-* 1.11
 * 1.12
 * 1.13
 * 1.14
 * 1.15
 * 1.16
 * 1.17
+* 1.18
+* 1.19
 
-By default, the Vagrant VMs are provisioned with Kubernetes 1.13. To run with any other
+By default, the Vagrant VMs are provisioned with Kubernetes 1.19. To run with any other
 supported version of Kubernetes, run the test suite with the following format:
 
 ::
 
-    K8S_VERSION=<version> ginkgo --focus="K8s*" -noColor
+    K8S_VERSION=<version> ginkgo --focus="K8s" -noColor
 
 .. note::
 
-   When provisioning VMs with the net-next kernel (``NETNEXT=true``) on
+   When provisioning VMs with the net-next kernel (``NETNEXT=1``) on
    VirtualBox which version does not match a version of the VM image
    VirtualBox Guest Additions, Vagrant will install a new version of
    the Additions with ``mount.vboxsf``. The latter is not compatible with
@@ -168,7 +169,7 @@ To run all of the Nightly tests, run the following command from the ``test`` dir
 
 ::
 
-    ginkgo --focus="Nightly*"  -noColor
+    ginkgo --focus="Nightly"  -noColor
 
 Similar to the other test suites, Ginkgo searches for all tests in all
 subdirectories that are "named" beginning with the string "Nightly" and contain
@@ -184,36 +185,65 @@ framework in the ``test/`` directory and interact with ginkgo directly:
 ::
 
     $ cd test/
-    $ ginkgo . -- --help | grep -A 1 cilium
+    $ ginkgo . -- -cilium.help
       -cilium.SSHConfig string
-    	    Specify a custom command to fetch SSH configuration (eg: 'vagrant ssh-config')
+            Specify a custom command to fetch SSH configuration (eg: 'vagrant ssh-config')
+      -cilium.benchmarks
+            Specifies benchmark tests should be run which may increase test time
+      -cilium.help
+            Display this help message.
       -cilium.holdEnvironment
-    	    On failure, hold the environment in its current state
+            On failure, hold the environment in its current state
+      -cilium.hubble-relay-image string
+            Specifies which image of hubble-relay to use during tests
+      -cilium.hubble-relay-tag string
+            Specifies which tag of hubble-relay to use during tests
       -cilium.image string
-        	Specifies which image of cilium to use during tests
+            Specifies which image of cilium to use during tests
+      -cilium.kubeconfig string
+            Kubeconfig to be used for k8s tests
+      -cilium.multinode
+            Enable tests across multiple nodes. If disabled, such tests may silently pass (default true)
       -cilium.operator-image string
-        	Specifies which image of cilium-operator to use during tests
+            Specifies which image of cilium-operator to use during tests
+      -cilium.operator-tag string
+            Specifies which tag of cilium-operator to use during tests
+      -cilium.passCLIEnvironment
+            Pass the environment invoking ginkgo, including PATH, to subcommands
       -cilium.provision
-        	Provision Vagrant boxes and Cilium before running test (default true)
+            Provision Vagrant boxes and Cilium before running test (default true)
       -cilium.provision-k8s
-        	Specifies whether Kubernetes should be deployed and installed via kubeadm or not (default true)
+            Specifies whether Kubernetes should be deployed and installed via kubeadm or not (default true)
+      -cilium.runQuarantined
+            Run tests that are under quarantine.
       -cilium.showCommands
-        	Output which commands are ran to stdout
+            Output which commands are ran to stdout
       -cilium.skipLogs
-        	skip gathering logs if a test fails
+            skip gathering logs if a test fails
+      -cilium.tag string
+            Specifies which tag of cilium to use during tests
       -cilium.testScope string
-        	Specifies scope of test to be ran (k8s, Nightly, runtime)   
-    
+            Specifies scope of test to be ran (k8s, Nightly, runtime)
+      -cilium.timeout duration
+            Specifies timeout for test run (default 24h0m0s)
+
+    Ginkgo ran 1 suite in 4.312100241s
+    Test Suite Failed
 
 For more information about other built-in options to Ginkgo, consult the
-`Ginkgo documentation <https://onsi.github.io/ginkgo/>`_.
+`Ginkgo documentation`_.
+
+.. _Ginkgo documentation: Ginkgo_
 
 Running Specific Tests Within a Test Suite
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 If you want to run one specified test, there are a few options:
 
-* By modifying code: add the prefix "FIt" on the test you want to run; this marks the test as focused. Ginkgo will skip other tests and will only run the "focused" test. For more information, consult the `Focused Specs <https://onsi.github.io/ginkgo/#focused-specs>`_ documentation from Ginkgo.
+* By modifying code: add the prefix "FIt" on the test you want to run; this
+  marks the test as focused. Ginkgo will skip other tests and will only run the
+  "focused" test. For more information, consult the `Focused Specs`_
+  documentation from Ginkgo.
 
 ::
 
@@ -226,15 +256,19 @@ If you want to run one specified test, there are a few options:
     })
 
 
-* From the command line: specify a more granular focus if you want to focus on, say, L7 tests:
+* From the command line: specify a more granular focus if you want to focus on, say, Runtime L7 tests:
 
 ::
 
-    ginkgo --focus "Run*" --focus "L7 "
+    ginkgo --focus "Runtime.*L7"
 
 
-This will focus on tests prefixed with "Run*", and within that focus, run any
-test that starts with "L7".
+This will focus on tests that contain "Runtime", followed by any
+number of any characters, followed by "L7". ``--focus`` is a regular
+expression and quotes are required if it contains spaces and to escape
+shell expansion of ``*``.
+
+.. _Focused Specs: https://onsi.github.io/ginkgo/#focused-specs
 
 Compiling the tests without running them
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -278,20 +312,17 @@ useful for testing Cilium.
 BeforeAll
 ^^^^^^^^^
 
-This function will run before all `BeforeEach
-<https://onsi.github.io/ginkgo/#extracting-common-setup-beforeeach>`_ within a
-`Describe or Context
-<https://onsi.github.io/ginkgo/#organizing-specs-with-containers-describe-and-context>`_.
+This function will run before all `BeforeEach`_ within a `Describe or Context`_.
 This method is an equivalent to ``SetUp`` or initialize functions in common
 unit test frameworks.
+
+.. _BeforeEach: https://onsi.github.io/ginkgo/#extracting-common-setup-beforeeach
+.. _Describe or Context: https://onsi.github.io/ginkgo/#organizing-specs-with-containers-describe-and-context
 
 AfterAll
 ^^^^^^^^
 
-This method will run after all `AfterEach
-<https://onsi.github.io/ginkgo/#extracting-common-setup-beforeeach>`_ functions
-defined in a `Describe or Context
-<https://onsi.github.io/ginkgo/#organizing-specs-with-containers-describe-and-context>`_.
+This method will run after all `AfterEach`_ functions defined in a `Describe or Context`_.
 This method is used for tearing down objects created which are used by all
 ``Its`` within the given ``Context`` or ``Describe``. It is ran after all Its
 have ran, this method is a equivalent to ``tearDown`` or ``finalize`` methods in
@@ -299,6 +330,8 @@ common unit test frameworks.
 
 A good use case for using ``AfterAll`` method is to remove containers or pods
 that are needed for multiple ``Its`` in the given ``Context`` or ``Describe``.
+
+.. _AfterEach: BeforeEach_
 
 JustAfterEach
 ^^^^^^^^^^^^^
@@ -380,7 +413,7 @@ the option ``-v``:
 
 ::
 
-	ginkgo --focus "Runtime*" -v
+	ginkgo --focus "Runtime" -v
 
 In case that the verbose mode is not enough, you can retrieve all run commands
 and their output in the report directory (``./test/test_results``). Each test
@@ -429,11 +462,10 @@ This mode expects:
 
 - The current directory is ``cilium/test``
 
-- A test focus with ``--focus``. ``--focus="K8s*"`` selects all kubernetes tests.
+- A test focus with ``--focus``. ``--focus="K8s"`` selects all kubernetes tests.
 
 - Cilium images as full URLs specified with the ``--cilium.image`` and
-  ``--cilium.operator-image`` options, with matching ``CILIUM_IMAGE`` and
-  ``CILIUM_OPERATOR_IMAGE`` environment variables.
+  ``--cilium.operator-image`` options.
 
 - A working kubeconfig with the ``--cilium.kubeconfig`` option
 
@@ -451,37 +483,35 @@ An example invocation is
 
 ::
 
-  CNI_INTEGRATION=eks K8S_VERSION=1.13 CILIUM_IMAGE="quay.io/cilium/cilium:latest" CILIUM_OPERATOR_IMAGE="quay.io/cilium/operator:latest" ginkgo --focus="K8s*" -noColor -- -cilium.provision=false -cilium.kubeconfig=`echo ~/.kube/config` -cilium.image="quay.io/cilium/cilium:latest" -cilium.operator-image="quay.io/cilium/operator:latest" -cilium.passCLIEnvironment=true
+  CNI_INTEGRATION=eks K8S_VERSION=1.13 ginkgo --focus="K8s" -noColor -- -cilium.provision=false -cilium.kubeconfig=`echo ~/.kube/config` -cilium.image="docker.io/cilium/cilium" -cilium.operator-image="docker.io/cilium/operator" -cilium.passCLIEnvironment=true
 
-GKE (experimental)
-^^^^^^^^^^^^^^^^^^^^^^
-
-Not all tests can succeed on GKE. Many do, however and may be useful.
+Running in GKE
+^^^^^^^^^^^^^^
 
 1- Setup a cluster as in :ref:`k8s_install_gke` or utilize an existing
 cluster.
+
+.. note:: You do not need to deploy Cilium in this step, as the End-To-End
+          Testing Framework handles the deployment of Cilium.
 
 .. note:: The tests require machines larger than ``n1-standard-4``. This can be
           set with ``--machine-type n1-standard-4`` on cluster creation.
 
 
-2- Label 2 nodes for testing with ``cilium.io/ci-node=k8s1`` and
-``cilium.io/ci-node=k8s2``
-
-::
-
-  kubectl label node gke-my-cluster-default-pool-b011879a-6j26 cilium.io/ci-node=k8s1
-  kubectl label node gke-my-cluster-default-pool-b011879a-b1r2 cilium.io/ci-node=k8s2
-
-3- Invoke the tests from ``cilium/test`` with options set as explained in
+2- Invoke the tests from ``cilium/test`` with options set as explained in
 `Running End-To-End Tests In Other Environments via kubeconfig`_
 
+.. note:: GKE clusters may have namespaces stuck at the ``Terminating`` state,
+          causing Ginkgo tests to fail. If so, you'll see them in ``kubectl get ns``,
+          and can get rid of them by running ``cilium/test/gke/clean-cluster.sh``.
+
 ::
 
-  CNI_INTEGRATION=gke K8S_VERSION=1.13 CILIUM_IMAGE="quay.io/cilium/cilium:latest" CILIUM_OPERATOR_IMAGE="quay.io/cilium/operator:latest" ginkgo --focus="K8s*" -noColor -- -cilium.provision=false -cilium.kubeconfig=`echo ~/.kube/config` -cilium.image="quay.io/cilium/cilium:latest" -cilium.operator-image="quay.io/cilium/operator:latest" -cilium.passCLIEnvironment=true
+  CNI_INTEGRATION=gke K8S_VERSION=1.14 ginkgo -v --focus="K8sDemo" -noColor -- -cilium.provision=false -cilium.kubeconfig=`echo ~/.kube/config` -cilium.image="docker.io/cilium/cilium" -cilium.operator-image="docker.io/cilium/operator" -cilium.hubble-relay-image="docker.io/cilium/hubble-relay" -cilium.passCLIEnvironment=true
 
-.. note:: The kubernetes version defaults to 1.13 but can be configured with
-          versions between 1.13 and 1.15. Check with ``kubectl version`` 
+.. note:: The kubernetes version defaults to 1.18 but can be configured with
+          versions between 1.13 and 1.18. Version should match the server
+          version reported by ``kubectl version``.
 
 AWS EKS (experimental)
 ^^^^^^^^^^^^^^^^^^^^^^
@@ -491,24 +521,41 @@ Not all tests can succeed on EKS. Many do, however and may be useful.
 1- Setup a cluster as in :ref:`k8s_install_eks` or utilize an existing
 cluster.
 
-2- Label 2 nodes for testing with ``cilium.io/ci-node=k8s1`` and
-``cilium.io/ci-node=k8s2``
-
-::
-
-  kubectl label node ip-192-168-6-126.us-west-2.compute.internal cilium.io/ci-node=k8s1
-  kubectl label node ip-192-168-68-145.us-west-2.compute.internal cilium.io/ci-node=k8s2
-
-3- Invoke the tests from ``cilium/test`` with options set as explained in
+2- Invoke the tests from ``cilium/test`` with options set as explained in
 `Running End-To-End Tests In Other Environments via kubeconfig`_
 
 ::
 
-  CNI_INTEGRATION=eks K8S_VERSION=1.14 CILIUM_IMAGE="quay.io/cilium/cilium:latest" CILIUM_OPERATOR_IMAGE="quay.io/cilium/operator:latest" ginkgo --focus="K8s*" -noColor -- -cilium.provision=false -cilium.kubeconfig=`echo ~/.kube/config` -cilium.image="quay.io/cilium/cilium:latest" -cilium.operator-image="quay.io/cilium/operator:latest" -cilium.passCLIEnvironment=true
+  CNI_INTEGRATION=eks K8S_VERSION=1.14 ginkgo -v --focus="K8sDemo" -noColor -- -cilium.provision=false -cilium.kubeconfig=`echo ~/.kube/config` -cilium.image="docker.io/cilium/cilium" -cilium.operator-image="docker.io/cilium/operator" -cilium.passCLIEnvironment=true
 
 Be sure to pass ``--cilium.passCLIEnvironment=true`` to allow kubectl to invoke ``aws-iam-authenticator``
 
 .. note:: The kubernetes version varies between AWS regions. Be sure to check with ``kubectl version``
+
+Adding new Managed Kubernetes providers
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+All Managed Kubernetes test support relies on using a pre-configured kubeconfig
+file.  This isn't always adequate, however, and adding defaults specific to
+each provider is possible. The `commit adding GKE <https://github.com/cilium/cilium/commit/c2d8445fd725c515a635c8c3ad3be901a08084eb>`_
+support is a good reference.
+
+1- Add a map of helm settings to act as an override for this provider in
+`test/helpers/kubectl.go <https://github.com/cilium/cilium/blob/26dec4c4f4311df2b1a6c909b27ff7fe6e46929f/test/helpers/kubectl.go#L80-L102>`_.
+These should be the helm settings used when generating cilium specs for this provider.
+
+2- Add a unique `CI Integration constant <https://github.com/cilium/cilium/blob/26dec4c4f4311df2b1a6c909b27ff7fe6e46929f/test/helpers/kubectl.go#L66-L67>`_.
+This value is passed in when invoking ginkgo via the ``CNI_INTEGRATON``
+environment variable.
+
+3- Update the `helm overrides <https://github.com/cilium/cilium/blob/26dec4c4f4311df2b1a6c909b27ff7fe6e46929f/test/helpers/kubectl.go#L138-L147>`_
+mapping with the constant and the helm settings.
+
+4- For cases where a test should be skipped use the ``SkipIfIntegration``. To
+skip whole contexts, use ``SkipContextIf``. More complex logic can be expressed
+with functions like ``IsIntegration``. These functions are all part of the
+`test/helpers <https://github.com/cilium/cilium/tree/26dec4c4f4311df2b1a6c909b27ff7fe6e46929f/test/helpers>`_
+package.
 
 Running End-To-End Tests In Other Environments via SSH
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -551,7 +598,7 @@ To run this you can use the following command:
 
 
 VMs for Testing
-~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~
 
 The VMs used for testing are defined in ``test/Vagrantfile``. There are a variety of
 configuration options that can be passed as environment variables:
@@ -567,7 +614,7 @@ configuration options that can be passed as environment variables:
 +----------------------+-------------------+--------------+------------------------------------------------------------------+
 | CONTAINER\_RUNTIME   | docker            | containerd   | To set the default container runtime in the Kubernetes cluster   |
 +----------------------+-------------------+--------------+------------------------------------------------------------------+
-| K8S\_VERSION         | 1.13              | 1.\*\*       | Kubernetes version to install                                    |
+| K8S\_VERSION         | 1.18              | 1.\*\*       | Kubernetes version to install                                    |
 +----------------------+-------------------+--------------+------------------------------------------------------------------+
 | SERVER\_BOX          | cilium/ubuntu-dev | *            | Vagrantcloud base image                                          |
 +----------------------+-------------------+--------------+------------------------------------------------------------------+
@@ -575,6 +622,62 @@ configuration options that can be passed as environment variables:
 +----------------------+-------------------+--------------+------------------------------------------------------------------+
 | VM\_MEMORY           | 4096              | \d+          | RAM size in Megabytes                                            |
 +----------------------+-------------------+--------------+------------------------------------------------------------------+
+
+VM images
+~~~~~~~~~
+
+The test suite relies on Vagrant to automatically download the required VM
+image, if it is not already available on the system. VM images weight several
+gigabytes so this may take some time, but faster tools such as `aria2`_ can
+speed up the process by opening multiple connections. The script
+`test/packet/scripts/add_vagrant_box.sh`_ can be useful to manually download
+selected images with aria2 prior to launching the test suite, or to
+periodically update images in a ``cron`` job::
+
+    $ bash test/packet/scripts/add_vagrant_box.sh -h
+    usage: add_vagrant_box.sh [options] [vagrant_box_defaults.rb path]
+            path to vagrant_box_defaults.rb defaults to ./vagrant_box_defaults.rb
+
+    options:
+            -a              use aria2c instead of curl
+            -b <box>        download selected box (defaults: ubuntu ubuntu-next)
+            -l              download latest versions instead of using vagrant_box_defaults
+            -t              download to /tmp/ instead of current directory
+            -h              display this help
+
+    examples:
+            download boxes ubuntu and ubuntu-next from vagrant_box_defaults.rb:
+            $ add-vagrant-boxes.sh $HOME/go/src/github.com/cilium/cilium/vagrant_box_defaults.rb
+            download latest version for ubuntu-dev and ubuntu-next:
+            $ add-vagrant-boxes.sh -l -b ubuntu-dev -b ubuntu-next
+            same as above, downloading into /tmp/ and using aria2c:
+            $ add-vagrant-boxes.sh -alt -b ubuntu-dev -b ubuntu-next
+
+.. _aria2: https://aria2.github.io/
+.. _test/packet/scripts/add_vagrant_box.sh:
+   https://github.com/cilium/cilium/blob/master/test/packet/scripts/add_vagrant_box.sh
+
+Known Issues and Workarounds
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+VirtualBox hostonlyifs and DHCP related errors
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+If you see the following error, take a look at this `GitHub issue
+<https://github.com/hashicorp/vagrant/issues/3083#issuecomment-41156076>`_ for
+workarounds.
+
+::
+
+    A host only network interface you're attempting to configure via DHCP
+    already has a conflicting host only adapter with DHCP enabled. The
+    DHCP on this adapter is incompatible with the DHCP settings. Two
+    host only network interfaces are not allowed to overlap, and each
+    host only network interface can have only one DHCP server. Please
+    reconfigure your host only network or remove the virtual machine
+    using the other host only network.
+
+Also, consider upgrading VirtualBox and Vagrant to the latest versions.
 
 Further Assistance
 ~~~~~~~~~~~~~~~~~~

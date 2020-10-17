@@ -15,17 +15,14 @@
 package cmd
 
 import (
-	"bufio"
 	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"syscall"
 
-	"github.com/cilium/cilium/common"
 	"github.com/cilium/cilium/pkg/bpf"
+	"github.com/cilium/cilium/pkg/common"
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/maps/tunnel"
 	"github.com/cilium/cilium/pkg/netns"
@@ -34,6 +31,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 // configCmd represents the config command
@@ -50,14 +48,12 @@ var (
 	cleanAll bool
 	cleanBPF bool
 	force    bool
-	runPath  string
 )
 
 const (
-	allFlagName     = "all-state"
-	bpfFlagName     = "bpf-state"
-	forceFlagName   = "force"
-	runPathFlagName = "run-path"
+	allFlagName   = "all-state"
+	bpfFlagName   = "bpf-state"
+	forceFlagName = "force"
 
 	cleanCiliumEnvVar = "CLEAN_CILIUM_STATE"
 	cleanBpfEnvVar    = "CLEAN_CILIUM_BPF_STATE"
@@ -136,40 +132,57 @@ type ciliumCleanup struct {
 	links     map[int]netlink.Link
 	tcFilters map[string][]*netlink.BpfFilter
 	netNSs    []string
+	bpfOnly   bool
 }
 
-func newCiliumCleanup() ciliumCleanup {
-	routes, links, err := findRoutesAndLinks()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
-	}
+func newCiliumCleanup(bpfOnly bool) ciliumCleanup {
+	var routes map[int]netlink.Route
+	var ciliumLinks map[int]netlink.Link
+	var netNSs []string
+	var err error
 
-	netNSs, err := netns.ListNamedNetNSWithPrefix(ciliumNetNSPrefix)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
-	}
-
-	tcFilters := map[string][]*netlink.BpfFilter{}
-	if link, err := getNodePortNativeDev(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
-	} else if link != nil {
-		if filters, err := getTCFilters(*link); err != nil {
+	if !bpfOnly {
+		routes, ciliumLinks, err = findRoutesAndLinks()
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %s\n", err)
-		} else if len(filters) != 0 {
-			tcFilters[(*link).Attrs().Name] = filters
+		}
+
+		netNSs, err = netns.ListNamedNetNSWithPrefix(ciliumNetNSPrefix)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %s\n", err)
 		}
 	}
 
-	return ciliumCleanup{routes, links, tcFilters, netNSs}
+	tcFilters := map[string][]*netlink.BpfFilter{}
+	links, err := netlink.LinkList()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+	} else {
+		for _, link := range links {
+			if filters, err := getTCFilters(link); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+			} else if len(filters) != 0 {
+				tcFilters[link.Attrs().Name] = filters
+			}
+		}
+	}
+
+	return ciliumCleanup{routes, ciliumLinks, tcFilters, netNSs, bpfOnly}
 }
 
 func (c ciliumCleanup) whatWillBeRemoved() []string {
-	toBeRemoved := []string{
-		fmt.Sprintf("mounted cgroupv2 at %s", defaults.DefaultCgroupRoot),
-		fmt.Sprintf("library code in %s", defaults.LibraryPath),
-		fmt.Sprintf("endpoint state in %s", defaults.RuntimePath),
-		fmt.Sprintf("CNI configuration at %s, %s, %s",
-			cniConfigV1, cniConfigV2, cniConfigV3),
+	toBeRemoved := []string{}
+
+	if len(c.tcFilters) > 0 {
+		section := "tc filters\n"
+		for linkName, f := range c.tcFilters {
+			section += fmt.Sprintf("%s %v\n", linkName, f)
+		}
+		toBeRemoved = append(toBeRemoved, section)
+	}
+
+	if c.bpfOnly {
+		return toBeRemoved
 	}
 
 	if len(c.routes) > 0 {
@@ -188,14 +201,6 @@ func (c ciliumCleanup) whatWillBeRemoved() []string {
 		toBeRemoved = append(toBeRemoved, section)
 	}
 
-	if len(c.tcFilters) > 0 {
-		section := "tc filters\n"
-		for linkName, f := range c.tcFilters {
-			section += fmt.Sprintf("%s %v\n", linkName, f)
-		}
-		toBeRemoved = append(toBeRemoved, section)
-	}
-
 	if len(c.netNSs) > 0 {
 		section := "network namespaces\n"
 		for _, n := range c.netNSs {
@@ -204,6 +209,14 @@ func (c ciliumCleanup) whatWillBeRemoved() []string {
 		toBeRemoved = append(toBeRemoved, section)
 	}
 
+	toBeRemoved = append(toBeRemoved, fmt.Sprintf("mounted cgroupv2 at %s",
+		defaults.DefaultCgroupRoot))
+	toBeRemoved = append(toBeRemoved, fmt.Sprintf("library code in %s",
+		defaults.LibraryPath))
+	toBeRemoved = append(toBeRemoved, fmt.Sprintf("endpoint state in %s",
+		defaults.RuntimePath))
+	toBeRemoved = append(toBeRemoved, fmt.Sprintf("CNI configuration at %s, %s, %s",
+		cniConfigV1, cniConfigV2, cniConfigV3))
 	return toBeRemoved
 }
 
@@ -220,14 +233,17 @@ func (c ciliumCleanup) cleanupFuncs() []cleanupFunc {
 		return removeTCFilters(c.tcFilters)
 	}
 
-	return []cleanupFunc{
-		unmountCgroup,
-		removeDirs,
-		removeCNI,
-		cleanupRoutesAndLinks,
-		cleanupNamedNetNSs,
+	funcs := []cleanupFunc{
 		cleanupTCFilters,
 	}
+	if !c.bpfOnly {
+		funcs = append(funcs, cleanupRoutesAndLinks)
+		funcs = append(funcs, cleanupNamedNetNSs)
+		funcs = append(funcs, unmountCgroup)
+		funcs = append(funcs, removeDirs)
+		funcs = append(funcs, removeCNI)
+	}
+	return funcs
 }
 
 func runCleanup() {
@@ -241,21 +257,20 @@ func runCleanup() {
 	cleanAll = viper.GetBool(allFlagName) || viper.GetBool(cleanCiliumEnvVar)
 	cleanBPF = viper.GetBool(bpfFlagName) || viper.GetBool(cleanBpfEnvVar)
 
-	// if no flags are specifed then clean all
+	// if no flags are specified then clean all
 	if (cleanAll || cleanBPF) == false {
 		cleanAll = true
 	}
 
 	var cleanups []cleanup
 
+	// tc filter cleanup must come before removing files in BPF fs as
+	// otherwise we remove tail call maps and get drops due to 'missed
+	// tail call' in the datapath.
+	cleanups = append(cleanups, newCiliumCleanup(!cleanAll && cleanBPF))
 	if cleanAll || cleanBPF {
 		cleanups = append(cleanups, bpfCleanup{})
 	}
-
-	if cleanAll {
-		cleanups = append(cleanups, newCiliumCleanup())
-	}
-
 	if len(cleanups) == 0 {
 		return
 	}
@@ -292,7 +307,7 @@ func showWhatWillBeRemoved(cleanups []cleanup) {
 		warning += fmt.Sprintf("- %s\n", warn)
 	}
 
-	fmt.Printf(warning)
+	fmt.Print(warning)
 }
 
 func confirmCleanup() bool {
@@ -323,7 +338,7 @@ func unmountCgroup() error {
 	}
 
 	log.Info("Trying to unmount ", cgroupRoot)
-	if err := syscall.Unmount(cgroupRoot, syscall.MNT_FORCE); err != nil {
+	if err := unix.Unmount(cgroupRoot, unix.MNT_FORCE); err != nil {
 		return fmt.Errorf("Failed to unmount %s: %s", cgroupRoot, err)
 	}
 	return nil
@@ -454,66 +469,18 @@ func getTCFilters(link netlink.Link) ([]*netlink.BpfFilter, error) {
 		}
 		for _, f := range filters {
 			if bpfFilter, ok := f.(*netlink.BpfFilter); ok {
-				allFilters = append(allFilters, bpfFilter)
+				if strings.Contains(bpfFilter.Name, "bpf_netdev") ||
+					strings.Contains(bpfFilter.Name, "bpf_network") ||
+					strings.Contains(bpfFilter.Name, "bpf_host") ||
+					strings.Contains(bpfFilter.Name, "bpf_lxc") ||
+					strings.Contains(bpfFilter.Name, "bpf_overlay") {
+					allFilters = append(allFilters, bpfFilter)
+				}
 			}
 		}
 	}
 
 	return allFilters, nil
-}
-
-func getNodePortNativeDev() (*netlink.Link, error) {
-	var nativeDev *netlink.Link
-
-	path := filepath.Join(defaults.RuntimePath, defaults.StateDir, "globals/node_config.h")
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	defer f.Close()
-
-	nodePortFound := false
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-
-		switch {
-		case line == "#define ENABLE_NODEPORT 1":
-			nodePortFound = true
-		case strings.HasPrefix(line, "#define NATIVE_DEV_IFINDEX"):
-			tmp := strings.Split(line, " ")
-			if len(tmp) < 3 {
-				return nil, fmt.Errorf("Cannot determine ifindex with %q", line)
-			}
-			index, err := strconv.Atoi(tmp[2])
-			if err != nil {
-				return nil, fmt.Errorf("Invalid ifindex %q: %s", tmp[2], err)
-			}
-			link, err := netlink.LinkByIndex(index)
-			if err != nil {
-				if _, ok := err.(netlink.LinkNotFoundError); ok {
-					// Link not found, just ignore as no tc filter to remove here
-					return nil, nil
-				}
-				return nil, err
-			}
-			nativeDev = &link
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-
-	if nodePortFound {
-		return nativeDev, nil
-	}
-
-	return nil, nil
 }
 
 func removeTCFilters(linkAndFilters map[string][]*netlink.BpfFilter) error {

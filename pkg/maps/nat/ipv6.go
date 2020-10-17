@@ -18,9 +18,9 @@ import (
 	"fmt"
 	"unsafe"
 
-	"github.com/cilium/cilium/common/types"
 	"github.com/cilium/cilium/pkg/byteorder"
 	"github.com/cilium/cilium/pkg/tuple"
+	"github.com/cilium/cilium/pkg/types"
 )
 
 // NatEntry6 represents an IPv6 entry in the NAT table.
@@ -34,6 +34,9 @@ type NatEntry6 struct {
 	Addr      types.IPv6 `align:"to_saddr"`
 	Port      uint16     `align:"to_sport"`
 }
+
+// SizeofNatEntry6 is the size of the NatEntry6 type in bytes.
+const SizeofNatEntry6 = int(unsafe.Sizeof(NatEntry6{}))
 
 // GetValuePtr returns the unsafe.Pointer for n.
 func (n *NatEntry6) GetValuePtr() unsafe.Pointer { return unsafe.Pointer(n) }

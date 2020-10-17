@@ -16,6 +16,7 @@ package npds
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -24,9 +25,9 @@ import (
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/proxylib/proxylib"
 
-	"github.com/cilium/proxy/go/cilium/api"
-	envoy_api_v2 "github.com/cilium/proxy/go/envoy/api/v2"
-	envoy_api_v2_core "github.com/cilium/proxy/go/envoy/api/v2/core"
+	cilium "github.com/cilium/proxy/go/cilium/api"
+	envoy_config_core "github.com/cilium/proxy/go/envoy/config/core/v3"
+	envoy_service_disacovery "github.com/cilium/proxy/go/envoy/service/discovery/v3"
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc"
@@ -168,10 +169,10 @@ func (c *Client) Run(connected func()) (err error) {
 	// VersionInfo must be empty as we have not received anything yet.
 	// ResourceNames is empty to request for all policies.
 	// ResponseNonce is copied from the response, initially empty.
-	req := envoy_api_v2.DiscoveryRequest{
+	req := envoy_service_disacovery.DiscoveryRequest{
 		TypeUrl:       NPDSTypeURL,
 		VersionInfo:   "",
-		Node:          &envoy_api_v2_core.Node{Id: c.nodeId},
+		Node:          &envoy_config_core.Node{Id: c.nodeId},
 		ResourceNames: nil,
 		ResponseNonce: "",
 	}
@@ -186,7 +187,7 @@ func (c *Client) Run(connected func()) (err error) {
 		// Receive next policy configuration. This will block until the
 		// server has a new version to send, which may take a long time.
 		resp, err := stream.Recv()
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
+		if err == io.EOF || errors.Is(err, io.ErrUnexpectedEOF) {
 			log.Debugf("NPDS: Client %s stream on %s closed.", c.nodeId, c.path)
 			break
 		}

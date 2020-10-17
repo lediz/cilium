@@ -1,4 +1,4 @@
-// Copyright 2016-2019 Authors of Cilium
+// Copyright 2016-2020 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,6 +19,9 @@ import (
 )
 
 const (
+	// AgentHealthPort is the default value for option.AgentHealthPort
+	AgentHealthPort = 9876
+
 	// IPv6ClusterAllocCIDR is the default value for option.IPv6ClusterAllocCIDR
 	IPv6ClusterAllocCIDR = IPv6ClusterAllocCIDRBase + "/64"
 
@@ -55,6 +58,14 @@ const (
 	// SockPathEnv is the environment variable to overwrite SockPath
 	SockPathEnv = "CILIUM_SOCK"
 
+	// HubbleSockPath is the path to the UNIX domain socket exposing the Hubble
+	// API to clients locally.
+	HubbleSockPath = RuntimePath + "/hubble.sock"
+
+	// HubbleSockPathEnv is the environment variable to overwrite
+	// HubbleSockPath.
+	HubbleSockPathEnv = "HUBBLE_SOCK"
+
 	// MonitorSockPath1_2 is the path to the UNIX domain socket used to
 	// distribute BPF and agent events to listeners.
 	// This is the 1.2 protocol version.
@@ -84,13 +95,8 @@ const (
 	DefaultMapPrefix = "tc/globals"
 
 	// ToFQDNsMinTTL is the default lower bound for TTLs used with ToFQDNs rules.
-	// This or ToFQDNsMinTTLPoller is used in DaemonConfig.Populate
+	// This is used in DaemonConfig.Populate
 	ToFQDNsMinTTL = 3600 // 1 hour in seconds
-
-	// ToFQDNsMinTTLPoller is the default lower bound for TTLs used with ToFQDNs
-	// rules when the poller is enabled.
-	// This or ToFQDNsMinTTL is used in DaemonConfig.Populate
-	ToFQDNsMinTTLPoller = 600 // 10 minutes in seconds
 
 	// ToFQDNsMaxIPsPerHost defines the maximum number of IPs to maintain
 	// for each FQDN name in an endpoint's FQDN cache
@@ -104,6 +110,10 @@ const (
 	// global cache on startup.
 	// The file is not re-read after agent start.
 	ToFQDNsPreCache = ""
+
+	// ToFQDNsEnableDNSCompression allows the DNS proxy to compress responses to
+	// endpoints that are larger than 512 Bytes or the EDNS0 option, if present.
+	ToFQDNsEnableDNSCompression = true
 
 	// IdentityChangeGracePeriod is the default value for
 	// option.IdentityChangeGracePeriod
@@ -129,8 +139,14 @@ const (
 	// EnableIPv6 is the default value for IPv6 enablement
 	EnableIPv6 = true
 
+	// EnableIPv6NDP is the default value for IPv6 NDP support enablement
+	EnableIPv6NDP = false
+
 	// EnableL7Proxy is the default value for L7 proxy enablement
 	EnableL7Proxy = true
+
+	// EnableHostLegacyRouting is the default value for using the old routing path via stack.
+	EnableHostLegacyRouting = false
 
 	// EnableExternalIPs is the default value for k8s service with externalIPs feature.
 	EnableExternalIPs = true
@@ -167,6 +183,12 @@ const (
 	// DatapathMode is the default value for the datapath mode.
 	DatapathMode = "veth"
 
+	// EnableBPFTProxy is the default value for EnableBPFTProxy
+	EnableBPFTProxy = false
+
+	// EnableXTSocketFallback is the default value for EnableXTSocketFallback
+	EnableXTSocketFallback = true
+
 	// EnableLocalNodeRoute default value for EnableLocalNodeRoute
 	EnableLocalNodeRoute = true
 
@@ -179,6 +201,10 @@ const (
 	// EnableEndpointHealthChecking is the default value for
 	// EnableEndpointHealthChecking
 	EnableEndpointHealthChecking = true
+
+	// EnableHealthCheckNodePort is the default value for
+	// EnableHealthCheckNodePort
+	EnableHealthCheckNodePort = true
 
 	// AlignCheckerName is the BPF object name for the alignchecker.
 	AlignCheckerName = "bpf_alignchecker.o"
@@ -209,6 +235,10 @@ const (
 	// invoked only for endpoints which are selected by policy changes.
 	SelectiveRegeneration = true
 
+	// K8sSyncTimeout specifies the standard time to allow for synchronizing
+	// local caches with Kubernetes state before exiting.
+	K8sSyncTimeout = 3 * time.Minute
+
 	// K8sWatcherEndpointSelector specifies the k8s endpoints that Cilium
 	// should watch for.
 	K8sWatcherEndpointSelector = "metadata.name!=kube-scheduler,metadata.name!=kube-controller-manager,metadata.name!=etcd-operator,metadata.name!=gcp-controller-manager"
@@ -226,11 +256,6 @@ const (
 	// connection tracking garbage collection
 	ConntrackGCStartingInterval = 5 * time.Minute
 
-	// PolicyMapEntries is the default number of entries allowed in an
-	// endpoint's policymap, ie the maximum number of peer identities that
-	// the endpoint could send/receive traffic to/from.
-	PolicyMapEntries = 16384 // Cilium 1.5 and earlier value
-
 	// K8sEventHandover enables use of the kvstore to optimize Kubernetes
 	// event handling by listening for k8s events in the operator and
 	// mirroring it into the kvstore for reduced overhead in large
@@ -243,10 +268,6 @@ const (
 	// EndpointInterfaceNamePrefix is the default prefix name of the
 	// interface names shared by all endpoints
 	EndpointInterfaceNamePrefix = "lxc+"
-
-	// BlacklistConflictingRoutes removes all IPs from the IPAM block if a
-	// local route not owned by Cilium conflicts with it
-	BlacklistConflictingRoutes = true
 
 	// ForceLocalPolicyEvalAtSource is the default value for
 	// option.ForceLocalPolicyEvalAtSource. It is enabled by default to
@@ -285,22 +306,22 @@ const (
 	// It is calculated as Min(int64 positive max, etcd MaxLeaseTTL, consul MaxLeaseTTL)
 	KVstoreLeaseMaxTTL = 86400 * time.Second
 
-	// ENIPreAllocation is the default value for
-	// CiliumNode.Spec.ENI.PreAllocate if no value is set
-	ENIPreAllocation = 8
+	// IPAMPreAllocation is the default value for
+	// CiliumNode.Spec.IPAM.PreAllocate if no value is set
+	IPAMPreAllocation = 8
 
 	// ENIFirstInterfaceIndex is the default value for
 	// CiliumNode.Spec.ENI.FirstInterfaceIndex if no value is set
 	ENIFirstInterfaceIndex = 1
 
-	// ENIParallelWorkers is the default max number of workers that process ENI operations
-	ENIParallelWorkers = 50
+	// ParallelAllocWorkers is the default max number of parallel workers doing allocation in the operator
+	ParallelAllocWorkers = 50
 
-	// AWSClientBurst is the default burst value for the AWS client
-	AWSClientBurst = 4
+	// IPAMAPIBurst is the default burst value when rate limiting access to external APIs
+	IPAMAPIBurst = 4
 
-	// AWSClientQPSLimit is the default QPS limit for the AWS client
-	AWSClientQPSLimit = 20.0
+	// IPAMAPIQPSLimit is the default QPS limit when rate limiting access to external APIs
+	IPAMAPIQPSLimit = 20.0
 
 	// AutoCreateCiliumNodeResource enables automatic creation of a
 	// CiliumNode resource for the local node
@@ -344,6 +365,31 @@ const (
 	// EnableRemoteNodeIdentity is the default value for option.EnableRemoteNodeIdentity
 	EnableRemoteNodeIdentity = false
 
-	// NodePortMode is the default value for option.NodePortMode
-	NodePortMode = "snat"
+	// IPAMExpiration is the timeout after which an IP subject to expiratio
+	// is being released again if no endpoint is being created in time.
+	IPAMExpiration = 10 * time.Minute
+
+	// EnableIPv4FragmentsTracking enables IPv4 fragments tracking for
+	// L4-based lookups
+	EnableIPv4FragmentsTracking = true
+
+	// FragmentsMapEntries is the default number of entries allowed in an
+	// the map used to track datagram fragments.
+	FragmentsMapEntries = 8192
+
+	// K8sEnableAPIDiscovery defines whether Kuberntes API groups and
+	// resources should be probed using the discovery API
+	K8sEnableAPIDiscovery = false
+
+	// EnableIdentityMark enables setting identity in mark field of packet
+	// for local traffic
+	EnableIdentityMark = true
+
+	// K8sEnableLeasesFallbackDiscovery enables k8s to fallback to API probing to check
+	// for the support of Leases in Kubernetes when there is an error in discovering
+	// API groups using Discovery API.
+	K8sEnableLeasesFallbackDiscovery = false
+
+	// KubeProxyReplacementHealthzBindAddr is the default kubeproxyReplacement healthz server bind addr
+	KubeProxyReplacementHealthzBindAddr = ""
 )

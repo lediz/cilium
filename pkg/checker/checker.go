@@ -15,7 +15,9 @@
 package checker
 
 import (
+	"fmt"
 	"reflect"
+	"regexp"
 
 	"github.com/cilium/cilium/pkg/comparator"
 
@@ -104,7 +106,7 @@ func DeepAllowUnexported(vs ...interface{}) cmp.Option {
 	for _, v := range vs {
 		structTypes(reflect.ValueOf(v), m)
 	}
-	var typs []interface{}
+	typs := make([]interface{}, 0, len(m))
 	for t := range m {
 		typs = append(typs, reflect.New(t).Elem().Interface())
 	}
@@ -138,4 +140,75 @@ func structTypes(v reflect.Value, m map[reflect.Type]struct{}) {
 			structTypes(v.Field(i), m)
 		}
 	}
+}
+
+type matchesChecker struct {
+	*check.CheckerInfo
+}
+
+// PartialMatches is a GoCheck checker that the provided regex matches at least
+// part of the provided string. It can act as a substitute for Matches.
+var (
+	matchesParams                = []string{"value", "regex"}
+	PartialMatches check.Checker = &matchesChecker{
+		&check.CheckerInfo{Name: "PartialMatches", Params: matchesParams},
+	}
+)
+
+// Check performs a regular expression search on the expression provided as the
+// second parameter and the value provided as the first parameter. It returns
+// true if the value matches the expression, otherwise it returns false.
+func (checker *matchesChecker) Check(params []interface{}, _ []string) (result bool, error string) {
+	valueStr, ok := params[0].(string)
+	if !ok {
+		return false, "Value must be a string"
+	}
+	regexStr, ok := params[1].(string)
+	if !ok {
+		return false, "Regex must be a string"
+	}
+	matches, err := regexp.MatchString(regexStr, valueStr)
+	if err != nil {
+		return false, "Failed to compile regex: " + err.Error()
+	}
+	return matches, ""
+}
+
+// -----------------------------------------------------------------------
+// HasKey checker.
+
+type hasKeyChecker struct {
+	*check.CheckerInfo
+}
+
+// The HasKey checker verifies that the obtained map contains the
+// provided key.
+//
+// For example:
+//
+//     c.Assert(myMap, HasKey, "five")
+//
+var HasKey check.Checker = &hasKeyChecker{
+	&check.CheckerInfo{Name: "HasKey", Params: []string{"map", "key"}},
+}
+
+func (checker *hasKeyChecker) Check(params []interface{}, names []string) (result bool, error string) {
+	m := reflect.ValueOf(params[0])
+	mType := m.Type()
+	key := reflect.ValueOf(params[1])
+	keyType := key.Type()
+
+	if mType.Kind() != reflect.Map {
+		return false, fmt.Sprintf("'%s' must be a map", names[0])
+	}
+	if mType.Key() != keyType {
+		return false, fmt.Sprintf("'%s' must be of '%s's key type (%s, not %s)",
+			names[1], names[0], mType.Key(), keyType)
+	}
+	for _, v := range m.MapKeys() {
+		if v.Interface() == key.Interface() {
+			return true, ""
+		}
+	}
+	return false, fmt.Sprintf("'%s' has no key %v", names[0], key.Interface())
 }

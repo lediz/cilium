@@ -2,7 +2,7 @@
   
     WARNING: You are looking at unreleased Cilium documentation.
     Please use the official rendered version released here:
-    http://docs.cilium.io
+    https://docs.cilium.io
 
 .. _minor_release_process:
 
@@ -66,6 +66,11 @@ On Freeze date
 
 #. Checkout to master and update the ``.github/cilium-actions.yml`` to have
    all the necessary configurations for the backport of the new ``vX.Y`` branch.
+   Specifically, ensure that:
+
+   * The project at the top of the file points to the "next" release,
+   * A new section is added for the upcoming release that is being prepared, and
+   * The section for the oldest release is removed.
 
    ::
 
@@ -86,7 +91,7 @@ On Freeze date
 
 #. Set the branch as "Active" and the "Privacy Level" to "Private" in the
    readthedocs Admin page. (Replace ``v1.2`` with the right branch)
-   ``https://readthedocs.org/dashboard/cilium/version/v1.2``
+   ``https://readthedocs.org/dashboard/cilium/version/v1.2/``
 
 #. Since this is the first release being made from a new branch, please
    follow the :ref:`generic_release_process` to release ``v1.2.0-rc1``.
@@ -115,3 +120,23 @@ For the final release
 
 #. Follow the :ref:`generic_release_process` to create the final replace and replace
    ``X.Y.0-rcX`` with ``X.Y.0``.
+
+#. Announce to Slack with a more thorough release text. Sample text:
+
+   ::
+
+      @channel :cilium-new: **Announcement:** Cilium 1.7.0 is out! :tada:
+
+      <Short summary of major features pulled from Blog, eg:>
+      *Amazing Technology*: Just some of the great work the community has
+      been working on over the past few months.
+
+      For more information, see the blog post:
+      https://cilium.io/blog/2020/02/18/cilium-17
+
+#. Update ``SECURITY.md`` to represent the security support for the most recent
+   three release series.
+
+#. Set the branch for the oldest release (now EOL) as "Active" and "Hidden" in
+   the readthedocs Admin page. (Replace ``v1.2`` with the right branch)
+   ``https://readthedocs.org/dashboard/cilium/version/v1.2/``

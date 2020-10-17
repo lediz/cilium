@@ -2,7 +2,7 @@
 
     WARNING: You are looking at unreleased Cilium documentation.
     Please use the official rendered version released here:
-    http://docs.cilium.io
+    https://docs.cilium.io
 
 .. _k8s_quick_install:
 
@@ -34,6 +34,3 @@ Install Cilium
     kubectl create -f \ |SCM_WEB|\/install/kubernetes/quick-install.yaml
 
 .. include:: k8s-install-validate.rst
-.. include:: hubble-install.rst
-.. include:: getting-started-next-steps.rst
-

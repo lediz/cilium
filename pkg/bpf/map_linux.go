@@ -1,4 +1,4 @@
-// Copyright 2016-2019 Authors of Cilium
+// Copyright 2016-2020 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,8 +25,6 @@ import (
 	"os"
 	"path"
 	"reflect"
-	"sync"
-	"syscall"
 	"time"
 	"unsafe"
 
@@ -76,8 +74,7 @@ type MapInfo struct {
 	KeySize  uint32
 	MapValue MapValue
 	// ReadValueSize is the value size that is used to read from the BPF maps
-	// this value an the ValueSize values can be different for BPF_MAP_TYPE_PERCPU_HASH
-	// for example.
+	// this value and the ValueSize values can be different for MapTypePerCPUHash.
 	ReadValueSize uint32
 	ValueSize     uint32
 	MaxEntries    uint32
@@ -99,7 +96,6 @@ type Map struct {
 	fd   int
 	name string
 	path string
-	once sync.Once
 	lock lock.RWMutex
 
 	// inParallelMode is true when the Map is currently being run in
@@ -114,15 +110,12 @@ type Map struct {
 	// enableSync is true when synchronization retries have been enabled.
 	enableSync bool
 
-	// openLock serializes calls to Map.Open()
-	openLock lock.Mutex
-
 	// NonPersistent is true if the map does not contain persistent data
 	// and should be removed on startup.
 	NonPersistent bool
 
 	// DumpParser is a function for parsing keys and values from BPF maps
-	dumpParser DumpParser
+	DumpParser DumpParser
 
 	cache map[string]*cacheEntry
 
@@ -135,8 +128,25 @@ type Map struct {
 	outstandingErrors int
 }
 
-// NewMap creates a new Map instance - object representing a BPF map
-func NewMap(name string, mapType MapType, mapKey MapKey, keySize int, mapValue MapValue, valueSize, maxEntries int, flags uint32, innerID uint32, dumpParser DumpParser) *Map {
+type NewMapOpts struct {
+	CheckValueSize bool // Enable mapValue and valueSize size check
+}
+
+// NewMapWithOpts creates a new Map instance - object representing a BPF map
+func NewMapWithOpts(name string, mapType MapType, mapKey MapKey, keySize int,
+	mapValue MapValue, valueSize, maxEntries int, flags uint32, innerID uint32,
+	dumpParser DumpParser, opts *NewMapOpts) *Map {
+
+	if size := reflect.TypeOf(mapKey).Elem().Size(); size != uintptr(keySize) {
+		panic(fmt.Sprintf("Invalid %s map key size (%d != %d)", name, size, keySize))
+	}
+
+	if opts.CheckValueSize {
+		if size := reflect.TypeOf(mapValue).Elem().Size(); size != uintptr(valueSize) {
+			panic(fmt.Sprintf("Invalid %s map value size (%d != %d)", name, size, valueSize))
+		}
+	}
+
 	m := &Map{
 		MapInfo: MapInfo{
 			MapType:       mapType,
@@ -151,9 +161,19 @@ func NewMap(name string, mapType MapType, mapKey MapKey, keySize int, mapValue M
 			OwnerProgType: ProgTypeUnspec,
 		},
 		name:       path.Base(name),
-		dumpParser: dumpParser,
+		DumpParser: dumpParser,
 	}
 	return m
+}
+
+// NewMap creates a new Map instance - object representing a BPF map
+func NewMap(name string, mapType MapType, mapKey MapKey, keySize int,
+	mapValue MapValue, valueSize, maxEntries int, flags uint32, innerID uint32,
+	dumpParser DumpParser) *Map {
+
+	return NewMapWithOpts(name, mapType, mapKey, keySize, mapValue, valueSize,
+		maxEntries, flags, innerID, dumpParser,
+		&NewMapOpts{CheckValueSize: true})
 }
 
 // NewPerCPUHashMap creates a new Map type of "per CPU hash" - object representing a BPF map
@@ -162,7 +182,7 @@ func NewMap(name string, mapType MapType, mapKey MapKey, keySize int, mapValue M
 func NewPerCPUHashMap(name string, mapKey MapKey, keySize int, mapValue MapValue, valueSize, cpus, maxEntries int, flags uint32, innerID uint32, dumpParser DumpParser) *Map {
 	m := &Map{
 		MapInfo: MapInfo{
-			MapType:       BPF_MAP_TYPE_PERCPU_HASH,
+			MapType:       MapTypePerCPUHash,
 			MapKey:        mapKey,
 			KeySize:       uint32(keySize),
 			MapValue:      mapValue,
@@ -174,7 +194,7 @@ func NewPerCPUHashMap(name string, mapKey MapKey, keySize int, mapValue MapValue
 			OwnerProgType: ProgTypeUnspec,
 		},
 		name:       path.Base(name),
-		dumpParser: dumpParser,
+		DumpParser: dumpParser,
 	}
 	return m
 }
@@ -433,7 +453,7 @@ func (m *Map) OpenParallel() (bool, error) {
 // support for this map type, then the map will be opened as MapTypeHash
 // instead. Note that the BPF code that interacts with this map *MUST* be
 // structured in such a way that the map is declared as the same type based on
-// the same probe logic (eg HAVE_LRU_MAP_TYPE, HAVE_LPM_MAP_TYPE).
+// the same probe logic (eg HAVE_LRU_HASH_MAP_TYPE, HAVE_LPM_TRIE_MAP_TYPE).
 //
 // For code that uses an LPMTrie, the BPF code must also use macros to retain
 // the "longest prefix match" behaviour on top of the hash maps, for example
@@ -447,13 +467,23 @@ func (m *Map) OpenOrCreate() (bool, error) {
 	return m.openOrCreate(true)
 }
 
-// OpenOrCreateUnpinned is similar to OpenOrCreate (see above) but without
-// pinning the map to the file system if it had to be created.
-func (m *Map) OpenOrCreateUnpinned() (bool, error) {
+// CreateUnpinned creates the map without pinning it to the file system.
+func (m *Map) CreateUnpinned() error {
 	m.lock.Lock()
 	defer m.lock.Unlock()
 
-	return m.openOrCreate(false)
+	_, err := m.openOrCreate(false)
+	return err
+}
+
+// Create is similar to OpenOrCreate, but closes the map after creating or
+// opening it.
+func (m *Map) Create() (bool, error) {
+	isNew, err := m.OpenOrCreate()
+	if err != nil {
+		return isNew, err
+	}
+	return isNew, m.Close()
 }
 
 func (m *Map) openOrCreate(pin bool) (bool, error) {
@@ -473,7 +503,7 @@ func (m *Map) openOrCreate(pin bool) (bool, error) {
 
 	mapType := GetMapType(m.MapType)
 	flags := m.Flags | GetPreAllocateMapFlags(mapType)
-	fd, isNew, err := OpenOrCreateMap(m.path, int(mapType), m.KeySize, m.ValueSize, m.MaxEntries, flags, m.InnerID, pin)
+	fd, isNew, err := OpenOrCreateMap(m.path, mapType, m.KeySize, m.ValueSize, m.MaxEntries, flags, m.InnerID, pin)
 	if err != nil {
 		return false, err
 	}
@@ -486,10 +516,19 @@ func (m *Map) openOrCreate(pin bool) (bool, error) {
 	return isNew, nil
 }
 
+// Open opens the BPF map. All calls to Open() are serialized due to acquiring
+// m.lock
 func (m *Map) Open() error {
-	m.openLock.Lock()
-	defer m.openLock.Unlock()
+	m.lock.Lock()
+	defer m.lock.Unlock()
 
+	return m.open()
+}
+
+// open opens the BPF map. It is identical to Open() but should be used when
+// m.lock is already held. open() may only be used if m.lock is held for
+// writing.
+func (m *Map) open() error {
 	if m.fd != 0 {
 		return nil
 	}
@@ -544,16 +583,16 @@ type MapValidator func(path string) (bool, error)
 // deepcopy of the key and value on between each iterations to avoid memory
 // corruption.
 func (m *Map) DumpWithCallback(cb DumpCallback) error {
+	if err := m.Open(); err != nil {
+		return err
+	}
+
 	m.lock.RLock()
 	defer m.lock.RUnlock()
 
 	key := make([]byte, m.KeySize)
 	nextKey := make([]byte, m.KeySize)
 	value := make([]byte, m.ReadValueSize)
-
-	if err := m.Open(); err != nil {
-		return err
-	}
 
 	if err := GetFirstKey(m.fd, unsafe.Pointer(&nextKey[0])); err != nil {
 		if err == io.EOF {
@@ -570,7 +609,7 @@ func (m *Map) DumpWithCallback(cb DumpCallback) error {
 		key:   uint64(uintptr(unsafe.Pointer(&key[0]))),
 		value: uint64(uintptr(unsafe.Pointer(&nextKey[0]))),
 	}
-	bpfCurrentKeyPtr := uintptr(unsafe.Pointer(&bpfCurrentKey))
+	bpfCurrentKeyPtr := unsafe.Pointer(&bpfCurrentKey)
 	bpfCurrentKeySize := unsafe.Sizeof(bpfCurrentKey)
 
 	bpfNextKey := bpfAttrMapOpElem{
@@ -579,7 +618,7 @@ func (m *Map) DumpWithCallback(cb DumpCallback) error {
 		value: uint64(uintptr(unsafe.Pointer(&value[0]))),
 	}
 
-	bpfNextKeyPtr := uintptr(unsafe.Pointer(&bpfNextKey))
+	bpfNextKeyPtr := unsafe.Pointer(&bpfNextKey)
 	bpfNextKeySize := unsafe.Sizeof(bpfNextKey)
 
 	for {
@@ -588,7 +627,7 @@ func (m *Map) DumpWithCallback(cb DumpCallback) error {
 			return err
 		}
 
-		mk, mv, err = m.dumpParser(nextKey, value, mk, mv)
+		mk, mv, err = m.DumpParser(nextKey, value, mk, mv)
 		if err != nil {
 			return err
 		}
@@ -666,7 +705,7 @@ func (m *Map) DumpReliablyWithCallback(cb DumpCallback, stats *DumpStats) error 
 		key:   uint64(uintptr(unsafe.Pointer(&currentKey[0]))),
 		value: uint64(uintptr(unsafe.Pointer(&value[0]))),
 	}
-	bpfCurrentKeyPtr := uintptr(unsafe.Pointer(&bpfCurrentKey))
+	bpfCurrentKeyPtr := unsafe.Pointer(&bpfCurrentKey)
 	bpfCurrentKeySize := unsafe.Sizeof(bpfCurrentKey)
 
 	bpfNextKey := bpfAttrMapOpElem{
@@ -675,7 +714,7 @@ func (m *Map) DumpReliablyWithCallback(cb DumpCallback, stats *DumpStats) error 
 		value: uint64(uintptr(unsafe.Pointer(&nextKey[0]))),
 	}
 
-	bpfNextKeyPtr := uintptr(unsafe.Pointer(&bpfNextKey))
+	bpfNextKeyPtr := unsafe.Pointer(&bpfNextKey)
 	bpfNextKeySize := unsafe.Sizeof(bpfNextKey)
 
 	// maxLookup is an upper bound limit to prevent backtracking forever
@@ -716,7 +755,7 @@ func (m *Map) DumpReliablyWithCallback(cb DumpCallback, stats *DumpStats) error 
 			continue
 		}
 
-		mk, mv, err = m.dumpParser(currentKey, value, mk, mv)
+		mk, mv, err = m.DumpParser(currentKey, value, mk, mv)
 		if err != nil {
 			stats.Interrupted++
 			return err
@@ -740,6 +779,7 @@ func (m *Map) DumpReliablyWithCallback(cb DumpCallback, stats *DumpStats) error 
 		// continue from the next key
 		copy(currentKey, nextKey)
 	}
+
 	return ErrMaxLookup
 }
 
@@ -774,14 +814,14 @@ func (m *Map) DumpIfExists(hash map[string][]string) error {
 }
 
 func (m *Map) Lookup(key MapKey) (MapValue, error) {
-	m.lock.RLock()
-	defer m.lock.RUnlock()
-
-	value := key.NewValue()
-
 	if err := m.Open(); err != nil {
 		return nil, err
 	}
+
+	value := key.NewValue()
+
+	m.lock.RLock()
+	defer m.lock.RUnlock()
 
 	err := LookupElement(m.fd, key.GetKeyPtr(), value.GetValuePtr())
 	if err != nil {
@@ -815,13 +855,14 @@ func (m *Map) Update(key MapKey, value MapValue) error {
 		}
 	}()
 
-	if err = m.Open(); err != nil {
+	if err = m.open(); err != nil {
 		return err
 	}
 
 	err = UpdateElement(m.fd, key.GetKeyPtr(), value.GetValuePtr(), 0)
 	if option.Config.MetricsConfig.BPFMapOps {
-		metrics.BPFMapOps.WithLabelValues(m.commonName(), metricOpUpdate, metrics.Error2Outcome(err)).Inc()
+		//TODO(sayboras): Remove deprecated label in 1.10
+		metrics.BPFMapOps.WithLabelValues(m.commonName(), m.commonName(), metricOpUpdate, metrics.Error2Outcome(err)).Inc()
 	}
 	return err
 }
@@ -855,34 +896,26 @@ func (m *Map) deleteCacheEntry(key MapKey, err error) {
 	}
 }
 
-func (m *Map) DeleteWithErrno(key MapKey) (error, syscall.Errno) {
-	var (
-		err   error
-		errno syscall.Errno
-	)
-
+// Delete deletes the map entry corresponding to the given key.
+func (m *Map) Delete(key MapKey) error {
 	m.lock.Lock()
 	defer m.lock.Unlock()
 
+	var err error
 	defer m.deleteCacheEntry(key, err)
 
-	if err = m.Open(); err != nil {
-		return err, 0
+	if err = m.open(); err != nil {
+		return err
 	}
 
-	_, errno = deleteElement(m.fd, key.GetKeyPtr())
+	_, errno := deleteElement(m.fd, key.GetKeyPtr())
 	if option.Config.MetricsConfig.BPFMapOps {
-		metrics.BPFMapOps.WithLabelValues(m.commonName(), metricOpDelete, metrics.Errno2Outcome(errno)).Inc()
+		//TODO(sayboras): Remove deprecated label in 1.10
+		metrics.BPFMapOps.WithLabelValues(m.commonName(), m.commonName(), metricOpDelete, metrics.Errno2Outcome(errno)).Inc()
 	}
 	if errno != 0 {
-		err = fmt.Errorf("Unable to delete element from map %s: %s", m.name, errno.Error())
+		err = fmt.Errorf("unable to delete element %s from map %s: %w", key, m.name, errno)
 	}
-
-	return err, errno
-}
-
-func (m *Map) Delete(key MapKey) error {
-	err, _ := m.DeleteWithErrno(key)
 	return err
 }
 
@@ -897,7 +930,6 @@ func (m *Map) scopedLogger() *logrus.Entry {
 func (m *Map) DeleteAll() error {
 	m.lock.Lock()
 	defer m.lock.Unlock()
-
 	scopedLog := m.scopedLogger()
 	scopedLog.Debug("deleting all entries in map")
 
@@ -912,7 +944,7 @@ func (m *Map) DeleteAll() error {
 		}
 	}
 
-	if err := m.Open(); err != nil {
+	if err := m.open(); err != nil {
 		return err
 	}
 
@@ -929,7 +961,7 @@ func (m *Map) DeleteAll() error {
 
 		err := DeleteElement(m.fd, unsafe.Pointer(&nextKey[0]))
 
-		mk, _, err2 := m.dumpParser(nextKey, []byte{}, mk, mv)
+		mk, _, err2 := m.DumpParser(nextKey, []byte{}, mk, mv)
 		if err2 == nil {
 			m.deleteCacheEntry(mk, err)
 		} else {
@@ -1099,7 +1131,7 @@ func (m *Map) CheckAndUpgrade(desired *MapInfo) bool {
 	return objCheck(
 		m.fd,
 		m.path,
-		int(desiredMapType),
+		desiredMapType,
 		desired.KeySize,
 		desired.ValueSize,
 		desired.MaxEntries,

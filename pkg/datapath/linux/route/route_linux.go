@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -328,6 +329,42 @@ type Rule struct {
 	Table int
 }
 
+// String returns the string representation of a Rule (adhering to the Stringer
+// interface).
+func (r Rule) String() string {
+	var (
+		str  string
+		from string
+		to   string
+	)
+
+	str += fmt.Sprintf("%d: ", r.Priority)
+
+	if r.From != nil {
+		from = r.From.String()
+	} else {
+		from = "all"
+	}
+
+	if r.To != nil {
+		to = r.To.String()
+	} else {
+		to = "all"
+	}
+
+	if r.Table == unix.RT_TABLE_MAIN {
+		str += fmt.Sprintf("from %s to %s lookup main", from, to)
+	} else {
+		str += fmt.Sprintf("from %s to %s lookup %d", from, to, r.Table)
+	}
+
+	if r.Mark != 0 {
+		str += fmt.Sprintf(" mark 0x%x mask 0x%x", r.Mark, r.Mask)
+	}
+
+	return str
+}
+
 func lookupRule(spec Rule, family int) (bool, error) {
 	rules, err := netlink.RuleList(family)
 	if err != nil {
@@ -357,33 +394,69 @@ func lookupRule(spec Rule, family int) (bool, error) {
 	return false, nil
 }
 
+// ListRules will list IP routing rules on Linux, filtered by `filter`. When
+// `filter` is nil, this function will return all rules, "unfiltered". This
+// function is meant to replicate the behavior of `ip rule list`.
+func ListRules(family int, filter *Rule) ([]netlink.Rule, error) {
+	var nlFilter netlink.Rule
+	var mask uint64
+
+	if filter != nil {
+		if filter.From != nil {
+			mask |= netlink.RT_FILTER_SRC
+			nlFilter.Src = filter.From
+		}
+		if filter.To != nil {
+			mask |= netlink.RT_FILTER_DST
+			nlFilter.Dst = filter.To
+		}
+		if filter.Table != 0 {
+			mask |= netlink.RT_FILTER_TABLE
+			nlFilter.Table = filter.Table
+		}
+		if filter.Priority != 0 {
+			mask |= netlink.RT_FILTER_PRIORITY
+			nlFilter.Priority = filter.Priority
+		}
+		if filter.Mark != 0 {
+			mask |= netlink.RT_FILTER_MARK
+			nlFilter.Mark = filter.Mark
+		}
+		if filter.Mask != 0 {
+			mask |= netlink.RT_FILTER_MASK
+			nlFilter.Mask = filter.Mask
+		}
+
+		nlFilter.Priority = filter.Priority
+		nlFilter.Mark = filter.Mark
+		nlFilter.Mask = filter.Mask
+		nlFilter.Src = filter.From
+		nlFilter.Dst = filter.To
+		nlFilter.Table = filter.Table
+	}
+	return netlink.RuleListFiltered(family, &nlFilter, mask)
+}
+
 // ReplaceRule add or replace rule in the routing table using a mark to indicate
 // table. Used with BPF datapath to set mark and direct packets to route table.
 func ReplaceRule(spec Rule) error {
-	exists, err := lookupRule(spec, netlink.FAMILY_V4)
-	if err != nil {
-		return err
-	}
-	if exists == true {
-		return nil
-	}
 	return replaceRule(spec, netlink.FAMILY_V4)
 }
 
 // ReplaceRuleIPv6 add or replace IPv6 rule in the routing table using a mark to
 // indicate table.
 func ReplaceRuleIPv6(spec Rule) error {
-	exists, err := lookupRule(spec, netlink.FAMILY_V6)
+	return replaceRule(spec, netlink.FAMILY_V6)
+}
+
+func replaceRule(spec Rule, family int) error {
+	exists, err := lookupRule(spec, family)
 	if err != nil {
 		return err
 	}
 	if exists == true {
 		return nil
 	}
-	return replaceRule(spec, netlink.FAMILY_V6)
-}
-
-func replaceRule(spec Rule, family int) error {
 	rule := netlink.NewRule()
 	rule.Mark = spec.Mark
 	rule.Mask = spec.Mask
@@ -397,19 +470,15 @@ func replaceRule(spec Rule, family int) error {
 
 // DeleteRule delete a mark based rule from the routing table.
 func DeleteRule(spec Rule) error {
-	rule := netlink.NewRule()
-	rule.Mark = spec.Mark
-	rule.Mask = spec.Mask
-	rule.Table = spec.Table
-	rule.Priority = spec.Priority
-	rule.Src = spec.From
-	rule.Dst = spec.To
-	rule.Family = netlink.FAMILY_V4
-	return netlink.RuleDel(rule)
+	return deleteRule(spec, netlink.FAMILY_V4)
 }
 
 // DeleteRuleIPv6 delete a mark based IPv6 rule from the routing table.
 func DeleteRuleIPv6(spec Rule) error {
+	return deleteRule(spec, netlink.FAMILY_V6)
+}
+
+func deleteRule(spec Rule, family int) error {
 	rule := netlink.NewRule()
 	rule.Mark = spec.Mark
 	rule.Mask = spec.Mask
@@ -417,6 +486,58 @@ func DeleteRuleIPv6(spec Rule) error {
 	rule.Priority = spec.Priority
 	rule.Src = spec.From
 	rule.Dst = spec.To
-	rule.Family = netlink.FAMILY_V6
+	rule.Family = family
 	return netlink.RuleDel(rule)
+}
+
+func lookupDefaultRoute(family int) (netlink.Route, error) {
+	linkIndex := 0
+
+	routes, err := netlink.RouteListFiltered(family, &netlink.Route{Dst: nil}, netlink.RT_FILTER_DST)
+	if err != nil {
+		return netlink.Route{}, fmt.Errorf("Unable to list direct routes: %s", err)
+	}
+
+	if len(routes) == 0 {
+		return netlink.Route{}, fmt.Errorf("Default route not found for family %d", family)
+	}
+
+	for _, route := range routes {
+		if linkIndex != 0 && linkIndex != route.LinkIndex {
+			return netlink.Route{}, fmt.Errorf("Found default routes with different netdev ifindices: %v vs %v",
+				linkIndex, route.LinkIndex)
+		}
+		linkIndex = route.LinkIndex
+	}
+
+	log.Debugf("Found default route on node %v", routes[0])
+	return routes[0], nil
+}
+
+// NodeDeviceWithDefaultRoute returns the node's device which handles the
+// default route in the current namespace
+func NodeDeviceWithDefaultRoute(enableIPv4, enableIPv6 bool) (netlink.Link, error) {
+	linkIndex := 0
+	if enableIPv4 {
+		route, err := lookupDefaultRoute(netlink.FAMILY_V4)
+		if err != nil {
+			return nil, err
+		}
+		linkIndex = route.LinkIndex
+	}
+	if enableIPv6 {
+		route, err := lookupDefaultRoute(netlink.FAMILY_V6)
+		if err != nil {
+			return nil, err
+		}
+		if linkIndex != 0 && linkIndex != route.LinkIndex {
+			return nil, fmt.Errorf("IPv4/IPv6 have different link indices")
+		}
+		linkIndex = route.LinkIndex
+	}
+	link, err := netlink.LinkByIndex(linkIndex)
+	if err != nil {
+		return nil, err
+	}
+	return link, nil
 }

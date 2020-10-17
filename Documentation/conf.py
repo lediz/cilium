@@ -33,6 +33,7 @@ import semver
 # Add any Sphinx extension module names here, as strings. They can be
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
 # ones.
+html_logo = "images/logo.svg"
 extensions = ['sphinx.ext.ifconfig',
               'sphinx.ext.githubpages',
               'sphinx.ext.extlinks',
@@ -70,14 +71,21 @@ release = open("../VERSION", "r").read().strip()
 # Used by version warning
 versionwarning_body_selector = "div.document"
 
+# The version of Go used to compile Cilium
+go_release = open("../GO_VERSION", "r").read().strip()
+
+# The image tag for Cilium docker images
+image_tag = 'v' + release
+
 # Fetch the docs version from an environment variable.
 # Map latest -> master.
 # Map stable -> current version number.
 branch = os.environ.get('READTHEDOCS_VERSION')
-if branch is None or branch == 'latest':
+if not branch or branch == 'latest':
     branch = 'HEAD'
     archive_name = 'master'
     chart_release = './cilium'
+    image_tag = 'latest'
 elif branch == 'stable':
     branch = release
     archive_name = release
@@ -88,10 +96,11 @@ else:
     chart_release = 'cilium/cilium --version ' + release
     tags.add('stable')
 relinfo = semver.parse_version_info(release)
-next_release = '%d.%d' % (relinfo.major, relinfo.minor)
+current_release = '%d.%d' % (relinfo.major, relinfo.minor)
 if relinfo.patch == 90:
     next_release = '%d.%d' % (relinfo.major, relinfo.minor + 1)
-current_release = release[0:3]
+else:
+    next_release = current_release
 githubusercontent = 'https://raw.githubusercontent.com/cilium/cilium/'
 scm_web = githubusercontent + branch
 jenkins_branch = 'https://jenkins.cilium.io/view/Cilium-v' + current_release
@@ -111,7 +120,9 @@ rst_epilog = """
 .. |CURRENT_RELEASE| replace:: \{c}
 .. |NEXT_RELEASE| replace:: \{n}
 .. |CHART_RELEASE| replace:: \{h}
-""".format(s=scm_web, b=branch, a=archive_name, f=archive_filename, l=archive_link, c=current_release, n=next_release, h=chart_release)
+.. |GO_RELEASE| replace:: \{g}
+.. |IMAGE_TAG| replace:: \{i}
+""".format(s=scm_web, b=branch, a=archive_name, f=archive_filename, l=archive_link, c=current_release, n=next_release, h=chart_release, g=go_release, i=image_tag)
 
 extlinks = {
     'git-tree': (scm_web + "/%s", ''),
@@ -130,7 +141,7 @@ language = None
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This patterns also effect to html_static_path and html_extra_path
-exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store', '_themes/**/*.rst']
+exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
 
 # The name of the Pygments (syntax highlighting) style to use.
 pygments_style = 'sphinx'
@@ -144,9 +155,11 @@ todo_include_todos = False
 # The theme to use for HTML and HTML Help pages.  See the documentation for
 # a list of builtin themes.
 #
-html_theme = "sphinx_rtd_theme"
-html_theme_path = ["_themes/sphinx_rtd_theme", ]
-html_style = "static/css/theme.css"
+if os.uname()[4] == "aarch64":
+  html_theme = "sphinx_rtd_theme"
+else:
+  html_theme = "sphinx_rtd_theme_cilium"
+
 html_context = {
     'release': release
 }
@@ -155,13 +168,14 @@ html_context = {
 # further.  For a list of options available for each theme, see the
 # documentation.
 #
-# html_theme_options = {}
+html_theme_options = {
+    'logo_only': True
+}
 
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
-html_static_path = ['images', '_static',
-                    '_themes/sphinx_rtd_theme/sphinx_rtd_theme']
+html_static_path = ['images', '_static']
 
 # -- Options for HTMLHelp output ------------------------------------------
 

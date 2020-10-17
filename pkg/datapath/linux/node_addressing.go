@@ -1,4 +1,4 @@
-// Copyright 2018-2019 Authors of Cilium
+// Copyright 2018-2020 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -30,7 +30,7 @@ import (
 // code should really move into this package.
 
 func listLocalAddresses(family int) ([]net.IP, error) {
-	ipsToExclude := ip.GetExcludedIPs()
+	ipsToExclude := node.GetExcludedIPs()
 	addrs, err := netlink.AddrList(nil, family)
 	if err != nil {
 		return nil, err
@@ -45,8 +45,7 @@ func listLocalAddresses(family int) ([]net.IP, error) {
 		if ip.IsExcluded(ipsToExclude, addr.IP) {
 			continue
 		}
-		switch addr.IP.String() {
-		case "127.0.0.1", "::1":
+		if addr.IP.IsLoopback() {
 			continue
 		}
 
@@ -86,6 +85,14 @@ func (a *addressFamilyIPv4) LocalAddresses() ([]net.IP, error) {
 	return listLocalAddresses(netlink.FAMILY_V4)
 }
 
+// LoadBalancerNodeAddresses returns all IPv4 node addresses on which the
+// loadbalancer should implement HostPort and NodePort services.
+func (a *addressFamilyIPv4) LoadBalancerNodeAddresses() []net.IP {
+	addrs := node.GetNodePortIPv4Addrs()
+	addrs = append(addrs, net.IPv4zero)
+	return addrs
+}
+
 type addressFamilyIPv6 struct{}
 
 func (a *addressFamilyIPv6) Router() net.IP {
@@ -102,6 +109,14 @@ func (a *addressFamilyIPv6) AllocationCIDR() *cidr.CIDR {
 
 func (a *addressFamilyIPv6) LocalAddresses() ([]net.IP, error) {
 	return listLocalAddresses(netlink.FAMILY_V6)
+}
+
+// LoadBalancerNodeAddresses returns all IPv6 node addresses on which the
+// loadbalancer should implement HostPort and NodePort services.
+func (a *addressFamilyIPv6) LoadBalancerNodeAddresses() []net.IP {
+	addrs := node.GetNodePortIPv6Addrs()
+	addrs = append(addrs, net.IPv6zero)
+	return addrs
 }
 
 type linuxNodeAddressing struct {

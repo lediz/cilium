@@ -15,14 +15,25 @@
 package probes
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/ioutil"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/cilium/cilium/pkg/command/exec"
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/option"
+	"golang.org/x/sys/unix"
 )
 
 var (
@@ -30,6 +41,10 @@ var (
 	once         sync.Once
 	probeManager *ProbeManager
 )
+
+// ErrKernelConfigNotFound is the error returned if the kernel config is unavailable
+// to the cilium agent.
+var ErrKernelConfigNotFound = errors.New("Kernel Config file not found")
 
 // KernelParam is a type based on string which represents CONFIG_* kernel
 // parameters which usually have values "y", "n" or "m".
@@ -85,6 +100,7 @@ type SystemConfig struct {
 	ConfigBpfilter               KernelParam `json:"CONFIG_BPFILTER"`
 	ConfigBpfilterUmh            KernelParam `json:"CONFIG_BPFILTER_UMH"`
 	ConfigTestBpf                KernelParam `json:"CONFIG_TEST_BPF"`
+	ConfigKernelHz               KernelParam `json:"CONFIG_HZ"`
 }
 
 // MapTypes contains bools indicating which types of BPF maps the currently
@@ -133,9 +149,8 @@ func NewProbeManager() *ProbeManager {
 	newProbeManager := func() {
 		var features Features
 		out, err := exec.WithTimeout(
-			defaults.ExecTimeout, "bpftool", "-j", "feature",
-			"probe", "filter_out",
-			"\\(trace\\|write_user\\)",
+			defaults.ExecTimeout,
+			"bpftool", "-j", "feature", "probe",
 		).CombinedOutput(log, true)
 		if err != nil {
 			log.WithError(err).Fatal("could not run bpftool")
@@ -149,15 +164,54 @@ func NewProbeManager() *ProbeManager {
 	return probeManager
 }
 
+func (p *ProbeManager) probeSystemKernelHz() (int, error) {
+	out, err := exec.WithTimeout(
+		defaults.ExecTimeout,
+		"cilium-probe-kernel-hz",
+	).Output(log, false)
+	if err != nil {
+		return 0, fmt.Errorf("Cannot probe CONFIG_HZ")
+	}
+	hz := 0
+	warp := 0
+	n, _ := fmt.Sscanf(string(out), "%d, %d\n", &hz, &warp)
+	if n == 2 && hz > 0 && hz < 100000 {
+		return hz, nil
+	}
+	return 0, fmt.Errorf("Invalid probed CONFIG_HZ value")
+}
+
+// SystemKernelHz returns the HZ value that the kernel has been configured with.
+func (p *ProbeManager) SystemKernelHz() (int, error) {
+	config := p.features.SystemConfig
+	if config.ConfigKernelHz == "" {
+		return p.probeSystemKernelHz()
+	}
+	hz, err := strconv.Atoi(string(config.ConfigKernelHz))
+	if err != nil {
+		return 0, err
+	}
+	if hz > 0 && hz < 100000 {
+		return hz, nil
+	}
+	return 0, fmt.Errorf("Invalid CONFIG_HZ value")
+}
+
 // SystemConfigProbes performs a check of kernel configuration parameters. It
 // returns an error when parameters required by Cilium are not enabled. It logs
 // warnings when optional parameters are not enabled.
 func (p *ProbeManager) SystemConfigProbes() error {
 	config := p.features.SystemConfig
+
+	if !p.KernelConfigAvailable() {
+		return ErrKernelConfigNotFound
+	}
+
 	// Required
 	if !config.ConfigBpf.Enabled() {
 		return fmt.Errorf("CONFIG_BPF kernel parameter is required")
 	}
+
 	if !config.ConfigBpfSyscall.Enabled() {
 		return fmt.Errorf(
 			"CONFIG_BPF_SYSCALL kernel parameter is required")
@@ -198,6 +252,38 @@ func (p *ProbeManager) SystemConfigProbes() error {
 	return nil
 }
 
+// GetRequiredConfig performs a check of mandatory kernel configuration options. It
+// returns a map indicating which required kernel parameters are enabled - and which are not.
+// GetRequiredConfig is being used by CLI "cilium kernel-check".
+func (p *ProbeManager) GetRequiredConfig() map[KernelParam]bool {
+	config := p.features.SystemConfig
+	kernelParams := make(map[KernelParam]bool)
+
+	kernelParams["CONFIG_BPF"] = config.ConfigBpf.Enabled()
+	kernelParams["CONFIG_BPF_SYSCALL"] = config.ConfigBpfSyscall.Enabled()
+	kernelParams["CONFIG_NET_SCH_INGRESS"] = config.ConfigNetSchIngress.Enabled()
+	kernelParams["CONFIG_NET_CLS_BPF"] = config.ConfigNetClsBpf.Enabled()
+	kernelParams["CONFIG_NET_CLS_ACT"] = config.ConfigNetClsAct.Enabled()
+	kernelParams["CONFIG_BPF_JIT"] = config.ConfigBpfJit.Enabled()
+	kernelParams["CONFIG_HAVE_EBPF_JIT"] = config.ConfigHaveEbpfJit.Enabled()
+
+	return kernelParams
+}
+
+// GetOptionalConfig performs a check of *optional* kernel configuration options. It
+// returns a map indicating which optional/non-mandatory kernel parameters are enabled.
+// GetOptionalConfig is being used by CLI "cilium kernel-check".
+func (p *ProbeManager) GetOptionalConfig() map[KernelParam]bool {
+	config := p.features.SystemConfig
+	kernelParams := make(map[KernelParam]bool)
+
+	kernelParams["CONFIG_CGROUP_BPF"] = config.ConfigCgroupBpf.Enabled()
+	kernelParams["CONFIG_LWTUNNEL_BPF"] = config.ConfigLwtunnelBpf.Enabled()
+	kernelParams["CONFIG_BPF_EVENTS"] = config.ConfigBpfEvents.Enabled()
+
+	return kernelParams
+}
+
 // GetMapTypes returns information about supported BPF map types.
 func (p *ProbeManager) GetMapTypes() *MapTypes {
 	return &p.features.MapTypes
@@ -217,4 +303,90 @@ func (p *ProbeManager) GetHelpers(prog string) map[string]struct{} {
 		}
 	}
 	return nil
+}
+
+// writeHeaders executes bpftool to generate BPF feature C macros and then
+// writes them to the given writer.
+func (p *ProbeManager) writeHeaders(featuresFile io.Writer) error {
+	cmd := exec.WithTimeout(
+		defaults.ExecTimeout, "bpftool", "feature", "probe", "macros")
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf(
+			"could not initialize stdout pipe for bpftool feature probe: %w", err)
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf(
+			"could not initialize stderr pipe for bpftool feature probe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf(
+			"could not start bpftool for bpftool feature probe: %w", err)
+	}
+
+	writer := bufio.NewWriter(featuresFile)
+	defer writer.Flush()
+
+	io.WriteString(writer, "#ifndef BPF_FEATURES_H_\n")
+	io.WriteString(writer, "#define BPF_FEATURES_H_\n\n")
+
+	io.Copy(writer, stdoutPipe)
+	if err := cmd.Wait(); err != nil {
+		stderr, err := ioutil.ReadAll(stderrPipe)
+		if err != nil {
+			return fmt.Errorf(
+				"reading from bpftool feature probe stderr pipe failed: %w", err)
+		}
+		return fmt.Errorf(
+			"bpftool feature probe did not run successfully: %s (%w)", stderr, err)
+	}
+
+	io.WriteString(writer, "#endif /* BPF_FEATURES_H_ */\n")
+
+	return nil
+}
+
+// CreateHeadersFile creates a C header file with macros indicating which BPF
+// features are available in the kernel.
+func (p *ProbeManager) CreateHeadersFile() error {
+	globalsDir := option.Config.GetGlobalsDir()
+	if err := os.MkdirAll(globalsDir, defaults.StateDirRights); err != nil {
+		return fmt.Errorf("could not create runtime directory %s: %w", globalsDir, err)
+	}
+	featuresFilePath := filepath.Join(globalsDir, "bpf_features.h")
+	featuresFile, err := os.Create(featuresFilePath)
+	if err != nil {
+		return fmt.Errorf(
+			"could not create features header file %s: %w", featuresFilePath, err)
+	}
+	defer featuresFile.Close()
+
+	if err := p.writeHeaders(featuresFile); err != nil {
+		return err
+	}
+	return nil
+}
+
+// KernelConfigAvailable checks if the Kernel Config is available on the
+// system or not.
+func (p *ProbeManager) KernelConfigAvailable() bool {
+	// Check Kernel Config is available or not.
+	// We are replicating BPFTools logic here to check if kernel config is available
+	// https://elixir.bootlin.com/linux/v5.7/source/tools/bpf/bpftool/feature.c#L390
+	info := unix.Utsname{}
+	err := unix.Uname(&info)
+	if err != nil {
+		return false
+	}
+	release := strings.TrimSpace(string(bytes.Trim(info.Release[:], "\x00")))
+
+	// Any error checking these files will return Kernel config not found error
+	if _, err := os.Stat(fmt.Sprintf("/boot/config-%s", release)); err != nil {
+		if _, err = os.Stat("/proc/config.gz"); err != nil {
+			return false
+		}
+	}
+
+	return true
 }

@@ -7,8 +7,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/internal/awsutil"
-	"github.com/aws/aws-sdk-go-v2/private/protocol"
-	"github.com/aws/aws-sdk-go-v2/private/protocol/ec2query"
 )
 
 type CreatePlacementGroupInput struct {
@@ -31,6 +29,9 @@ type CreatePlacementGroupInput struct {
 
 	// The placement strategy.
 	Strategy PlacementStrategy `locationName:"strategy" type:"string" enum:"true"`
+
+	// The tags to apply to the new placement group.
+	TagSpecifications []TagSpecification `locationName:"TagSpecification" locationNameList:"item" type:"list"`
 }
 
 // String returns the string representation
@@ -40,6 +41,9 @@ func (s CreatePlacementGroupInput) String() string {
 
 type CreatePlacementGroupOutput struct {
 	_ struct{} `type:"structure"`
+
+	// Describes a placement group.
+	PlacementGroup *PlacementGroup `locationName:"placementGroup" type:"structure"`
 }
 
 // String returns the string representation
@@ -62,7 +66,7 @@ const opCreatePlacementGroup = "CreatePlacementGroup"
 // instances in one partition do not share the same hardware with instances
 // in another partition.
 //
-// For more information, see Placement Groups (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/placement-groups.html)
+// For more information, see Placement groups (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/placement-groups.html)
 // in the Amazon Elastic Compute Cloud User Guide.
 //
 //    // Example sending a request using CreatePlacementGroupRequest.
@@ -85,8 +89,7 @@ func (c *Client) CreatePlacementGroupRequest(input *CreatePlacementGroupInput) C
 	}
 
 	req := c.newRequest(op, input, &CreatePlacementGroupOutput{})
-	req.Handlers.Unmarshal.Remove(ec2query.UnmarshalHandler)
-	req.Handlers.Unmarshal.PushBackNamed(protocol.UnmarshalDiscardBodyHandler)
+
 	return CreatePlacementGroupRequest{Request: req, Input: input, Copy: c.CreatePlacementGroupRequest}
 }
 

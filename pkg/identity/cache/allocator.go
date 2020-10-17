@@ -184,7 +184,7 @@ func (m *CachingIdentityAllocator) InitIdentityAllocator(client clientset.Interf
 		switch option.Config.IdentityAllocationMode {
 		case option.IdentityAllocationModeKVstore:
 			log.Debug("Identity allocation backed by KVStore")
-			backend, err = kvstoreallocator.NewKVStoreBackend(m.identitiesPath, owner.GetNodeSuffix(), GlobalIdentity{})
+			backend, err = kvstoreallocator.NewKVStoreBackend(m.identitiesPath, owner.GetNodeSuffix(), GlobalIdentity{}, kvstore.Client())
 			if err != nil {
 				log.WithError(err).Fatal("Unable to initialize kvstore backend for identity allocation")
 			}
@@ -300,13 +300,19 @@ func (m *CachingIdentityAllocator) WaitForInitialGlobalIdentities(ctx context.Co
 // re-used and reference counting is performed, otherwise a new identity is
 // allocated via the kvstore.
 func (m *CachingIdentityAllocator) AllocateIdentity(ctx context.Context, lbls labels.Labels, notifyOwner bool) (id *identity.Identity, allocated bool, err error) {
+	isNewLocally := false
+
 	// Notify the owner of the newly added identities so that the
 	// cached identities can be updated ASAP, rather than just
 	// relying on the kv-store update events.
 	defer func() {
-		if err == nil && allocated {
-			metrics.IdentityCount.Inc()
-			if notifyOwner {
+		if err == nil {
+			if allocated || isNewLocally {
+				metrics.Identity.Inc()
+				metrics.IdentityCount.Inc()
+			}
+
+			if allocated && notifyOwner {
 				added := IdentityCache{
 					id.ID: id.LabelArray,
 				}
@@ -349,7 +355,7 @@ func (m *CachingIdentityAllocator) AllocateIdentity(ctx context.Context, lbls la
 		return nil, false, fmt.Errorf("allocator not initialized")
 	}
 
-	idp, isNew, err := m.IdentityAllocator.Allocate(ctx, GlobalIdentity{lbls.LabelArray()})
+	idp, isNew, isNewLocally, err := m.IdentityAllocator.Allocate(ctx, GlobalIdentity{lbls.LabelArray()})
 	if err != nil {
 		return nil, false, err
 	}
@@ -359,6 +365,7 @@ func (m *CachingIdentityAllocator) AllocateIdentity(ctx context.Context, lbls la
 			logfields.Identity:       idp,
 			logfields.IdentityLabels: lbls.String(),
 			"isNew":                  isNew,
+			"isNewLocally":           isNewLocally,
 		}).Debug("Resolved identity")
 	}
 
@@ -371,6 +378,7 @@ func (m *CachingIdentityAllocator) AllocateIdentity(ctx context.Context, lbls la
 func (m *CachingIdentityAllocator) Release(ctx context.Context, id *identity.Identity) (released bool, err error) {
 	defer func() {
 		if released {
+			metrics.Identity.Dec()
 			metrics.IdentityCount.Dec()
 		}
 	}()
@@ -435,7 +443,18 @@ func (m *CachingIdentityAllocator) ReleaseSlice(ctx context.Context, owner Ident
 
 // WatchRemoteIdentities starts watching for identities in another kvstore and
 // syncs all identities to the local identity cache.
-func (m *CachingIdentityAllocator) WatchRemoteIdentities(backend kvstore.BackendOperations) *allocator.RemoteCache {
+func (m *CachingIdentityAllocator) WatchRemoteIdentities(backend kvstore.BackendOperations) (*allocator.RemoteCache, error) {
 	<-m.globalIdentityAllocatorInitialized
-	return m.IdentityAllocator.WatchRemoteKVStore(backend, m.identitiesPath)
+
+	remoteAllocatorBackend, err := kvstoreallocator.NewKVStoreBackend(m.identitiesPath, m.owner.GetNodeSuffix(), GlobalIdentity{}, backend)
+	if err != nil {
+		return nil, fmt.Errorf("Error setting up remote allocator backend: %s", err)
+	}
+
+	remoteAlloc, err := allocator.NewAllocator(GlobalIdentity{}, remoteAllocatorBackend, allocator.WithEvents(m.IdentityAllocator.GetEvents()))
+	if err != nil {
+		return nil, fmt.Errorf("Unable to initialize remote Identity Allocator: %s", err)
+	}
+
+	return m.IdentityAllocator.WatchRemoteKVStore(remoteAlloc), nil
 }

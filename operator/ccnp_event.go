@@ -18,25 +18,21 @@ import (
 	"context"
 	"time"
 
+	operatorOption "github.com/cilium/cilium/operator/option"
 	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/k8s"
 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/k8s/informer"
+	v1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
 	k8sversion "github.com/cilium/cilium/pkg/k8s/version"
 	"github.com/cilium/cilium/pkg/kvstore/store"
 	"github.com/cilium/cilium/pkg/metrics"
+	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy/groups"
 
-	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
-)
-
-var (
-	// ccnpStatusUpdateInterval is the amount of time between status updates
-	// being sent to the K8s apiserver for a given CCNP.
-	ccnpStatusUpdateInterval time.Duration
 )
 
 // enableCCNPWatcher is similar to enableCNPWatcher but handles the watch events for
@@ -44,7 +40,11 @@ var (
 // using CiliumNetworkPolicy itself, the entire implementation uses the methods
 // associcated with CiliumNetworkPolicy.
 func enableCCNPWatcher() error {
-	log.Info("Starting to garbage collect stale CiliumClusterwideNetworkPolicy status field entries...")
+	enableCNPStatusUpdates := kvstoreEnabled() && option.Config.K8sEventHandover && !option.Config.DisableCNPStatusUpdates
+	if enableCNPStatusUpdates {
+		log.Info("Starting a CCNP Status handover from kvstore to k8s...")
+	}
+	log.Info("Starting CCNP derivative handler...")
 
 	var (
 		ccnpConverterFunc informer.ConvertFunc
@@ -61,68 +61,74 @@ func enableCCNPWatcher() error {
 		ccnpConverterFunc = k8s.ConvertToCCNPWithStatus
 	}
 
-	if kvstoreEnabled() {
+	if enableCNPStatusUpdates {
+		ccnpStatusMgr = k8s.NewCCNPStatusEventHandler(ccnpStore, operatorOption.Config.CNPStatusUpdateInterval)
 		ccnpSharedStore, err := store.JoinSharedStore(store.Configuration{
 			Prefix: k8s.CCNPStatusesPath,
 			KeyCreator: func() store.Key {
 				return &k8s.CNPNSWithMeta{}
 			},
+			Observer: ccnpStatusMgr,
 		})
 		if err != nil {
 			return err
 		}
 
-		ccnpStatusMgr = k8s.NewCCNPStatusEventHandler(ccnpSharedStore, ccnpStore, ccnpStatusUpdateInterval)
-
-		go ccnpStatusMgr.WatchForCCNPStatusEvents()
+		// It is safe to update the CCNP store here given the CCNP Store
+		// will only be used by StartStatusHandler method which is used in the
+		// cilium v2 controller below.
+		ccnpStatusMgr.UpdateCNPStore(ccnpSharedStore)
 	}
 
 	ciliumV2Controller := informer.NewInformerWithStore(
 		cache.NewListWatchFromClient(k8s.CiliumClient().CiliumV2().RESTClient(),
-			"ciliumclusterwidenetworkpolicies", v1.NamespaceAll, fields.Everything()),
+			cilium_v2.CCNPPluralName, v1.NamespaceAll, fields.Everything()),
 		&cilium_v2.CiliumClusterwideNetworkPolicy{},
 		0,
 		cache.ResourceEventHandlerFuncs{
 			AddFunc: func(obj interface{}) {
 				metrics.EventTSK8s.SetToCurrentTime()
-				if cnp := k8s.CopyObjToV2CNP(obj); cnp != nil {
-					groups.AddDerivativeCNPIfNeeded(cnp.CiliumNetworkPolicy)
-					if kvstoreEnabled() {
-						ccnpStatusMgr.StartStatusHandler(cnp)
+				if cnp := k8s.ObjToSlimCNP(obj); cnp != nil {
+
+					// We need to deepcopy this structure because we are writing
+					// fields.
+					// See https://github.com/cilium/cilium/blob/27fee207f5422c95479422162e9ea0d2f2b6c770/pkg/policy/api/ingress.go#L112-L134
+					cnpCpy := cnp.DeepCopy()
+
+					groups.AddDerivativeCCNPIfNeeded(cnpCpy.CiliumNetworkPolicy)
+					if enableCNPStatusUpdates {
+						ccnpStatusMgr.StartStatusHandler(cnpCpy)
 					}
 				}
 			},
 			UpdateFunc: func(oldObj, newObj interface{}) {
 				metrics.EventTSK8s.SetToCurrentTime()
-				if oldCNP := k8s.CopyObjToV2CNP(oldObj); oldCNP != nil {
-					if newCNP := k8s.CopyObjToV2CNP(newObj); newCNP != nil {
-						if k8s.EqualV2CNP(oldCNP, newCNP) {
+				if oldCNP := k8s.ObjToSlimCNP(oldObj); oldCNP != nil {
+					if newCNP := k8s.ObjToSlimCNP(newObj); newCNP != nil {
+						if oldCNP.DeepEqual(newCNP) {
 							return
 						}
-						groups.UpdateDerivativeCNPIfNeeded(newCNP.CiliumNetworkPolicy, oldCNP.CiliumNetworkPolicy)
+
+						// We need to deepcopy this structure because we are writing
+						// fields.
+						// See https://github.com/cilium/cilium/blob/27fee207f5422c95479422162e9ea0d2f2b6c770/pkg/policy/api/ingress.go#L112-L134
+						newCNPCpy := newCNP.DeepCopy()
+						oldCNPCpy := oldCNP.DeepCopy()
+
+						groups.UpdateDerivativeCCNPIfNeeded(newCNPCpy.CiliumNetworkPolicy, oldCNPCpy.CiliumNetworkPolicy)
 					}
 				}
 			},
 			DeleteFunc: func(obj interface{}) {
 				metrics.EventTSK8s.SetToCurrentTime()
-				cnp := k8s.CopyObjToV2CNP(obj)
+				cnp := k8s.ObjToSlimCNP(obj)
 				if cnp == nil {
-					deletedObj, ok := obj.(cache.DeletedFinalStateUnknown)
-					if !ok {
-						return
-					}
-					// Delete was not observed by the watcher but is
-					// removed from kube-apiserver. This is the last
-					// known state and the object no longer exists.
-					cnp = k8s.CopyObjToV2CNP(deletedObj.Obj)
-					if cnp == nil {
-						return
-					}
+					return
 				}
 				// The derivative policy will be deleted by the parent but need
 				// to delete the cnp from the pooling.
 				groups.DeleteDerivativeFromCache(cnp.CiliumNetworkPolicy)
-				if kvstoreEnabled() {
+				if enableCNPStatusUpdates {
 					ccnpStatusMgr.StopStatusHandler(cnp)
 				}
 			},

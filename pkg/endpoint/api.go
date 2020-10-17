@@ -1,4 +1,4 @@
-// Copyright 2016-2019 Authors of Cilium
+// Copyright 2016-2020 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,18 +23,17 @@ import (
 	"sort"
 
 	"github.com/cilium/cilium/api/v1/models"
-	"github.com/cilium/cilium/common/addressing"
-	"github.com/cilium/cilium/pkg/controller"
+	"github.com/cilium/cilium/pkg/addressing"
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
-	"github.com/cilium/cilium/pkg/fqdn"
 	"github.com/cilium/cilium/pkg/identity/cache"
+	identitymodel "github.com/cilium/cilium/pkg/identity/model"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/labels/model"
-	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/labelsfilter"
 	"github.com/cilium/cilium/pkg/mac"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
-	"github.com/cilium/cilium/pkg/policy/trafficdirection"
+	"github.com/cilium/cilium/pkg/u8proto"
 )
 
 // GetLabelsModel returns the labels of the endpoint in their representation
@@ -66,37 +65,15 @@ func NewEndpointFromChangeModel(ctx context.Context, owner regeneration.Owner, p
 		return nil, nil
 	}
 
-	ep := &Endpoint{
-		owner:            owner,
-		proxy:            proxy,
-		ID:               uint16(base.ID),
-		containerName:    base.ContainerName,
-		containerID:      base.ContainerID,
-		dockerNetworkID:  base.DockerNetworkID,
-		dockerEndpointID: base.DockerEndpointID,
-		ifName:           base.InterfaceName,
-		K8sPodName:       base.K8sPodName,
-		K8sNamespace:     base.K8sNamespace,
-		datapathMapID:    int(base.DatapathMapID),
-		ifIndex:          int(base.InterfaceIndex),
-		OpLabels:         labels.NewOpLabels(),
-		DNSHistory:       fqdn.NewDNSCacheWithLimit(option.Config.ToFQDNsMinTTL, option.Config.ToFQDNsMaxIPsPerHost),
-		DNSZombies:       fqdn.NewDNSZombieMappings(option.Config.ToFQDNsMaxDeferredConnectionDeletes),
-		state:            "",
-		status:           NewEndpointStatus(),
-		hasBPFProgram:    make(chan struct{}, 0),
-		desiredPolicy:    policy.NewEndpointPolicy(owner.GetPolicyRepository()),
-		controllers:      controller.NewManager(),
-		regenFailedChan:  make(chan struct{}, 1),
-		allocator:        allocator,
-		exposed:          make(chan struct{}),
-	}
-
-	ctx, cancel := context.WithCancel(ctx)
-	ep.aliveCancel = cancel
-	ep.aliveCtx = ctx
-
-	ep.realizedPolicy = ep.desiredPolicy
+	ep := createEndpoint(owner, proxy, allocator, uint16(base.ID), base.InterfaceName)
+	ep.ifIndex = int(base.InterfaceIndex)
+	ep.containerName = base.ContainerName
+	ep.containerID = base.ContainerID
+	ep.dockerNetworkID = base.DockerNetworkID
+	ep.dockerEndpointID = base.DockerEndpointID
+	ep.K8sPodName = base.K8sPodName
+	ep.K8sNamespace = base.K8sNamespace
+	ep.datapathMapID = int(base.DatapathMapID)
 
 	if base.Mac != "" {
 		m, err := mac.ParseMAC(base.Mac)
@@ -138,16 +115,47 @@ func NewEndpointFromChangeModel(ctx context.Context, owner regeneration.Owner, p
 
 	if base.Labels != nil {
 		lbls := labels.NewLabelsFromModel(base.Labels)
-		identityLabels, infoLabels := labels.FilterLabels(lbls)
+		identityLabels, infoLabels := labelsfilter.Filter(lbls)
 		ep.OpLabels.OrchestrationIdentity = identityLabels
 		ep.OpLabels.OrchestrationInfo = infoLabels
 	}
 
-	ep.SetDefaultOpts(option.Config.Opts)
-
 	ep.setState(string(base.State), "Endpoint creation")
 
 	return ep, nil
+}
+
+func (e *Endpoint) getModelEndpointIdentitiersRLocked() *models.EndpointIdentifiers {
+	return &models.EndpointIdentifiers{
+		ContainerID:      e.containerID,
+		ContainerName:    e.containerName,
+		DockerEndpointID: e.dockerEndpointID,
+		DockerNetworkID:  e.dockerNetworkID,
+		PodName:          e.getK8sNamespaceAndPodName(),
+		K8sPodName:       e.K8sPodName,
+		K8sNamespace:     e.K8sNamespace,
+	}
+}
+
+func (e *Endpoint) getModelNetworkingRLocked() *models.EndpointNetworking {
+	return &models.EndpointNetworking{
+		Addressing: []*models.AddressPair{{
+			IPV4: e.IPv4.String(),
+			IPV6: e.IPv6.String(),
+		}},
+		InterfaceIndex: int64(e.ifIndex),
+		InterfaceName:  e.ifName,
+		Mac:            e.mac.String(),
+		HostMac:        e.nodeMAC.String(),
+	}
+}
+
+func (e *Endpoint) getModelCurrentStateRLocked() models.EndpointState {
+	currentState := models.EndpointState(e.state)
+	if currentState == models.EndpointStateReady && e.status.CurrentStatus() != OK {
+		return models.EndpointStateNotReady
+	}
+	return currentState
 }
 
 // GetModelRLocked returns the API model of endpoint e.
@@ -155,11 +163,6 @@ func NewEndpointFromChangeModel(ctx context.Context, owner regeneration.Owner, p
 func (e *Endpoint) GetModelRLocked() *models.Endpoint {
 	if e == nil {
 		return nil
-	}
-
-	currentState := models.EndpointState(e.state)
-	if currentState == models.EndpointStateReady && e.status.CurrentStatus() != OK {
-		currentState = models.EndpointStateNotReady
 	}
 
 	// This returns the most recent log entry for this endpoint. It is backwards
@@ -196,33 +199,19 @@ func (e *Endpoint) GetModelRLocked() *models.Endpoint {
 		Status: &models.EndpointStatus{
 			// FIXME GH-3280 When we begin implementing revision numbers this will
 			// diverge from models.Endpoint.Spec to reflect the in-datapath config
-			Realized: spec,
-			Identity: e.SecurityIdentity.GetModel(),
-			Labels:   lblMdl,
-			Networking: &models.EndpointNetworking{
-				Addressing: []*models.AddressPair{{
-					IPV4: e.IPv4.String(),
-					IPV6: e.IPv6.String(),
-				}},
-				InterfaceIndex: int64(e.ifIndex),
-				InterfaceName:  e.ifName,
-				Mac:            e.mac.String(),
-				HostMac:        e.nodeMAC.String(),
-			},
-			ExternalIdentifiers: &models.EndpointIdentifiers{
-				ContainerID:      e.containerID,
-				ContainerName:    e.containerName,
-				DockerEndpointID: e.dockerEndpointID,
-				DockerNetworkID:  e.dockerNetworkID,
-				PodName:          e.getK8sNamespaceAndPodName(),
-			},
+			Realized:            spec,
+			Identity:            identitymodel.CreateModel(e.SecurityIdentity),
+			Labels:              lblMdl,
+			Networking:          e.getModelNetworkingRLocked(),
+			ExternalIdentifiers: e.getModelEndpointIdentitiersRLocked(),
 			// FIXME GH-3280 When we begin returning endpoint revisions this should
 			// change to return the configured and in-datapath policies.
 			Policy:      e.GetPolicyModel(),
 			Log:         statusLog,
 			Controllers: controllerMdl,
-			State:       currentState, // TODO: Validate
+			State:       e.getModelCurrentStateRLocked(), // TODO: Validate
 			Health:      e.getHealthModel(),
+			NamedPorts:  e.getNamedPortsModel(),
 		},
 	}
 
@@ -252,13 +241,6 @@ func (e *Endpoint) getHealthModel() *models.EndpointHealth {
 			Policy:        models.EndpointHealthStatusPending,
 			Connected:     true,
 			OverallHealth: models.EndpointHealthStatusPending,
-		}
-	case models.EndpointStateCreating:
-		h = models.EndpointHealth{
-			Bpf:           models.EndpointHealthStatusBootstrap,
-			Policy:        models.EndpointHealthStatusDisabled,
-			Connected:     true,
-			OverallHealth: models.EndpointHealthStatusDisabled,
 		}
 	case models.EndpointStateWaitingForIdentity:
 		h = models.EndpointHealth{
@@ -301,6 +283,40 @@ func (e *Endpoint) GetHealthModel() *models.EndpointHealth {
 	return e.getHealthModel()
 }
 
+// getNamedPortsModel returns the endpoint's NamedPorts object.
+//
+// Must be called with e.Mutex locked.
+func (e *Endpoint) getNamedPortsModel() (np models.NamedPorts) {
+	k8sPorts := e.k8sPorts
+	// keep named ports ordered to avoid the unnecessary updates to
+	// kube-apiserver
+	names := make([]string, 0, len(k8sPorts))
+	for name := range k8sPorts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	np = make(models.NamedPorts, 0, len(k8sPorts))
+	for _, name := range names {
+		value := k8sPorts[name]
+		np = append(np, &models.Port{
+			Name:     name,
+			Port:     value.Port,
+			Protocol: u8proto.U8proto(value.Proto).String(),
+		})
+	}
+	return np
+}
+
+// GetNamedPortsModel returns the endpoint's NamedPorts object.
+func (e *Endpoint) GetNamedPortsModel() models.NamedPorts {
+	if err := e.rlockAlive(); err != nil {
+		return nil
+	}
+	defer e.runlock()
+	return e.getNamedPortsModel()
+}
+
 // GetModel returns the API model of endpoint e.
 func (e *Endpoint) GetModel() *models.Endpoint {
 	if e == nil {
@@ -325,49 +341,19 @@ func (e *Endpoint) GetPolicyModel() *models.EndpointPolicyStatus {
 		return nil
 	}
 
-	realizedIngressIdentities := make([]int64, 0)
-	realizedEgressIdentities := make([]int64, 0)
+	realizedLog := log.WithField("map-name", "realized").Logger
+	realizedIngressIdentities, realizedEgressIdentities :=
+		e.realizedPolicy.PolicyMapState.GetIdentities(realizedLog)
 
-	for policyMapKey := range e.realizedPolicy.PolicyMapState {
-		if policyMapKey.DestPort != 0 {
-			// If the port is non-zero, then the Key no longer only applies
-			// at L3. AllowedIngressIdentities and AllowedEgressIdentities
-			// contain sets of which identities (i.e., label-based L3 only)
-			// are allowed, so anything which contains L4-related policy should
-			// not be added to these sets.
-			continue
-		}
-		switch trafficdirection.TrafficDirection(policyMapKey.TrafficDirection) {
-		case trafficdirection.Ingress:
-			realizedIngressIdentities = append(realizedIngressIdentities, int64(policyMapKey.Identity))
-		case trafficdirection.Egress:
-			realizedEgressIdentities = append(realizedEgressIdentities, int64(policyMapKey.Identity))
-		default:
-			log.WithField(logfields.TrafficDirection, trafficdirection.TrafficDirection(policyMapKey.TrafficDirection)).Error("Unexpected traffic direction present in realized PolicyMap state for endpoint")
-		}
-	}
+	realizedDenyIngressIdentities, realizedDenyEgressIdentities :=
+		e.realizedPolicy.PolicyMapState.GetDenyIdentities(realizedLog)
 
-	desiredIngressIdentities := make([]int64, 0)
-	desiredEgressIdentities := make([]int64, 0)
+	desiredLog := log.WithField("map-name", "desired").Logger
+	desiredIngressIdentities, desiredEgressIdentities :=
+		e.desiredPolicy.PolicyMapState.GetIdentities(desiredLog)
 
-	for policyMapKey := range e.desiredPolicy.PolicyMapState {
-		if policyMapKey.DestPort != 0 {
-			// If the port is non-zero, then the Key no longer only applies
-			// at L3. AllowedIngressIdentities and AllowedEgressIdentities
-			// contain sets of which identities (i.e., label-based L3 only)
-			// are allowed, so anything which contains L4-related policy should
-			// not be added to these sets.
-			continue
-		}
-		switch trafficdirection.TrafficDirection(policyMapKey.TrafficDirection) {
-		case trafficdirection.Ingress:
-			desiredIngressIdentities = append(desiredIngressIdentities, int64(policyMapKey.Identity))
-		case trafficdirection.Egress:
-			desiredEgressIdentities = append(desiredEgressIdentities, int64(policyMapKey.Identity))
-		default:
-			log.WithField(logfields.TrafficDirection, trafficdirection.TrafficDirection(policyMapKey.TrafficDirection)).Error("Unexpected traffic direction present in desired PolicyMap state for endpoint")
-		}
-	}
+	desiredDenyIngressIdentities, desiredDenyEgressIdentities :=
+		e.desiredPolicy.PolicyMapState.GetDenyIdentities(desiredLog)
 
 	policyEnabled := e.policyStatus()
 
@@ -395,6 +381,8 @@ func (e *Endpoint) GetPolicyModel() *models.EndpointPolicyStatus {
 		PolicyRevision:           int64(e.policyRevision),
 		AllowedIngressIdentities: realizedIngressIdentities,
 		AllowedEgressIdentities:  realizedEgressIdentities,
+		DeniedIngressIdentities:  realizedDenyIngressIdentities,
+		DeniedEgressIdentities:   realizedDenyEgressIdentities,
 		CidrPolicy:               realizedCIDRPolicy.GetModel(),
 		L4:                       realizedL4Policy.GetModel(),
 		PolicyEnabled:            policyEnabled,
@@ -416,6 +404,8 @@ func (e *Endpoint) GetPolicyModel() *models.EndpointPolicyStatus {
 		PolicyRevision:           int64(e.nextPolicyRevision),
 		AllowedIngressIdentities: desiredIngressIdentities,
 		AllowedEgressIdentities:  desiredEgressIdentities,
+		DeniedIngressIdentities:  desiredDenyIngressIdentities,
+		DeniedEgressIdentities:   desiredDenyEgressIdentities,
 		CidrPolicy:               desiredCIDRPolicy.GetModel(),
 		L4:                       desiredL4Policy.GetModel(),
 		PolicyEnabled:            policyEnabled,
@@ -443,18 +433,19 @@ func (e *Endpoint) policyStatus() models.EndpointPolicyEnabled {
 	case e.realizedPolicy.EgressPolicyEnabled:
 		policyEnabled = models.EndpointPolicyEnabledEgress
 	}
-	return policyEnabled
-}
 
-// ValidPatchTransitionState checks whether the state to which the provided
-// model specifies is one to which an Endpoint can transition as part of a
-// call to PATCH on an Endpoint.
-func ValidPatchTransitionState(state models.EndpointState) bool {
-	switch string(state) {
-	case "", StateWaitingForIdentity, StateReady:
-		return true
+	if e.Options.IsEnabled(option.PolicyAuditMode) {
+		switch policyEnabled {
+		case models.EndpointPolicyEnabledIngress:
+			return models.EndpointPolicyEnabledAuditIngress
+		case models.EndpointPolicyEnabledEgress:
+			return models.EndpointPolicyEnabledAuditEgress
+		case models.EndpointPolicyEnabledBoth:
+			return models.EndpointPolicyEnabledAuditBoth
+		}
 	}
-	return false
+
+	return policyEnabled
 }
 
 // ProcessChangeRequest handles the update logic for performing a PATCH operation
@@ -556,6 +547,12 @@ func (e *Endpoint) ProcessChangeRequest(newEp *Endpoint, validPatchTransitionSta
 			reason = "Waiting on endpoint regeneration because identity is known while handling API PATCH"
 		case StateWaitingForIdentity:
 			reason = "Waiting on endpoint initial program regeneration while handling API PATCH"
+		default:
+			// Caller skips regeneration if reason == "". Bump the skipped regeneration level so that next
+			// regeneration will realise endpoint changes.
+			if e.skippedRegenerationLevel < regeneration.RegenerateWithDatapathRewrite {
+				e.skippedRegenerationLevel = regeneration.RegenerateWithDatapathRewrite
+			}
 		}
 	}
 

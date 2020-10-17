@@ -15,29 +15,65 @@
 package endpoint
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/cilium/cilium/api/v1/models"
-	"github.com/cilium/cilium/common"
-	"github.com/cilium/cilium/common/addressing"
+	"github.com/cilium/cilium/pkg/addressing"
+	"github.com/cilium/cilium/pkg/common"
+	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
 	"github.com/cilium/cilium/pkg/fqdn"
+	"github.com/cilium/cilium/pkg/fqdn/restore"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/ipcache"
 	"github.com/cilium/cilium/pkg/labels"
+	"github.com/cilium/cilium/pkg/labelsfilter"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/mac"
 	"github.com/cilium/cilium/pkg/option"
 
 	"github.com/sirupsen/logrus"
 )
+
+// getCiliumVersionString returns the first line containing ciliumCHeaderPrefix.
+func getCiliumVersionString(epCHeaderFilePath string) ([]byte, error) {
+	f, err := os.Open(epCHeaderFilePath)
+	if err != nil {
+		return []byte{}, err
+	}
+	br := bufio.NewReader(f)
+	defer f.Close()
+	for {
+		b, err := br.ReadBytes('\n')
+		if err == io.EOF {
+			return []byte{}, nil
+		}
+		if err != nil {
+			return []byte{}, err
+		}
+		if bytes.Contains(b, []byte(ciliumCHeaderPrefix)) {
+			return b, nil
+		}
+	}
+}
+
+// hostObjFileName is the name of the host object file.
+const hostObjFileName = "bpf_host.o"
+
+func hasHostObjectFile(epDir string) bool {
+	hostObjFilepath := filepath.Join(epDir, hostObjFileName)
+	_, err := os.Stat(hostObjFilepath)
+	return err == nil
+}
 
 // ReadEPsFromDirNames returns a mapping of endpoint ID to endpoint of endpoints
 // from a list of directory names that can possible contain an endpoint.
@@ -60,47 +96,73 @@ func ReadEPsFromDirNames(ctx context.Context, owner regeneration.Owner, basePath
 	possibleEPs := map[uint16]*Endpoint{}
 	for _, epDirName := range completeEPDirNames {
 		epDir := filepath.Join(basePath, epDirName)
-		readDir := func() string {
-			scopedLog := log.WithFields(logrus.Fields{
-				logfields.EndpointID: epDirName,
-				logfields.Path:       filepath.Join(epDir, common.CHeaderFileName),
-			})
-			scopedLog.Debug("Reading directory")
-			epFiles, err := ioutil.ReadDir(epDir)
-			if err != nil {
-				scopedLog.WithError(err).Warn("Error while reading directory. Ignoring it...")
-				return ""
-			}
-			cHeaderFile := common.FindEPConfigCHeader(epDir, epFiles)
-			if cHeaderFile == "" {
-				return ""
-			}
-			return cHeaderFile
-		}
-		// There's an odd issue where the first read dir doesn't work.
-		cHeaderFile := readDir()
-		if cHeaderFile == "" {
-			cHeaderFile = readDir()
-		}
+		isHost := hasHostObjectFile(epDir)
 
+		// We only check for the old header file. On v1.8+, if the old header
+		// file is present, the new header file will be too. When upgrading
+		// from pre-1.8, only the old header file is present and we will create
+		// the new.
+		// We can switch this to use the new header file once v1.8 is the
+		// oldest supported version.
+		cHeaderFile := filepath.Join(epDir, oldCHeaderFileName)
+		if isHost {
+			// Host endpoint doesn't have an old header file so that it's not
+			// restored on downgrades.
+			cHeaderFile = filepath.Join(epDir, common.CHeaderFileName)
+		}
 		scopedLog := log.WithFields(logrus.Fields{
 			logfields.EndpointID: epDirName,
 			logfields.Path:       cHeaderFile,
 		})
+		// This function checks the presence of a bug previously observed: the
+		// file was sometimes only found after the second check.
+		// We can remove this if we haven't seen the issue occur after a while.
+		headerFileExists := func() error {
+			_, fileExists := os.Stat(cHeaderFile)
+			for i := 0; i < 2 && fileExists != nil; i++ {
+				time.Sleep(100 * time.Millisecond)
+				_, err := os.Stat(cHeaderFile)
+				if (fileExists == nil) != (err == nil) {
+					scopedLog.WithError(err).Warn("BUG: stat() has unstable behavior")
+				}
+				fileExists = err
+			}
+			return fileExists
+		}
 
-		if cHeaderFile == "" {
-			scopedLog.Warning("C header file not found. Ignoring endpoint")
+		if err := headerFileExists(); err != nil {
+			scopedLog.WithError(err).Warn("C header file not found. Ignoring endpoint")
 			continue
 		}
 
+		// This copy is only needed when upgrading from a pre-1.8 Cilium and we
+		// can thus remove it once Cilium v1.8 is the oldest supported version.
+		newCHeaderFile := filepath.Join(epDir, common.CHeaderFileName)
+		if _, err := os.Stat(newCHeaderFile); err != nil {
+			if !os.IsNotExist(err) {
+				scopedLog.WithError(err).Warn("Failed to check if C header exists. Ignoring endpoint")
+				continue
+			}
+			if err := os.Rename(cHeaderFile, newCHeaderFile); err != nil {
+				scopedLog.WithError(err).Warn("Failed to rename C header. Ignoring endpoint")
+				continue
+			}
+			if err := os.Symlink(common.CHeaderFileName, cHeaderFile); err != nil {
+				scopedLog.WithError(err).Warn("Failed to create symlink for C header. Ignoring endpoint")
+				continue
+			}
+			scopedLog.Debug("Created symlink for endpoint C header file")
+		}
+		cHeaderFile = newCHeaderFile
+
 		scopedLog.Debug("Found endpoint C header file")
 
-		strEp, err := common.GetCiliumVersionString(cHeaderFile)
+		bEp, err := getCiliumVersionString(cHeaderFile)
 		if err != nil {
 			scopedLog.WithError(err).Warn("Unable to read the C header file")
 			continue
 		}
-		ep, err := parseEndpoint(ctx, owner, strEp)
+		ep, err := parseEndpoint(ctx, owner, bEp)
 		if err != nil {
 			scopedLog.WithError(err).Warn("Unable to parse the C header file")
 			continue
@@ -122,7 +184,7 @@ func ReadEPsFromDirNames(ctx context.Context, owner regeneration.Owner, basePath
 // names that can possibly contain an endpoint, into two lists, containing those
 // names that represent an incomplete endpoint restore and those that do not.
 func partitionEPDirNamesByRestoreStatus(eptsDirNames []string) (complete []string, incomplete []string) {
-	dirNames := make(map[string]struct{})
+	dirNames := make(map[string]struct{}, len(eptsDirNames))
 	for _, epDirName := range eptsDirNames {
 		dirNames[epDirName] = struct{}{}
 	}
@@ -165,7 +227,8 @@ func (e *Endpoint) RegenerateAfterRestore() error {
 	scopedLog := log.WithField(logfields.EndpointID, e.ID)
 
 	regenerationMetadata := &regeneration.ExternalRegenerationMetadata{
-		Reason: "syncing state to host",
+		Reason:            "syncing state to host",
+		RegenerationLevel: regeneration.RegenerateWithDatapathRewrite,
 	}
 	if buildSuccess := <-e.Regenerate(regenerationMetadata); !buildSuccess {
 		scopedLog.Warn("Failed while regenerating endpoint")
@@ -186,16 +249,38 @@ func (e *Endpoint) restoreIdentity() error {
 	}
 	scopedLog := log.WithField(logfields.EndpointID, e.ID)
 	// Filter the restored labels with the new daemon's filter
-	l, _ := labels.FilterLabels(e.OpLabels.AllLabels())
+	l, _ := labelsfilter.Filter(e.OpLabels.AllLabels())
 	e.runlock()
 
-	allocateCtx, cancel := context.WithTimeout(context.Background(), option.Config.KVstoreConnectivityTimeout)
-	defer cancel()
-	identity, _, err := e.allocator.AllocateIdentity(allocateCtx, l, true)
+	// Getting the ep's identity while we are restoring should block the
+	// restoring of the endpoint until we get its security identity ID.
+	// If the endpoint is removed, this controller will cancel the allocator
+	// requests.
+	controllerName := fmt.Sprintf("restoring-ep-identity (%v)", e.ID)
+	var (
+		identity          *identity.Identity
+		allocatedIdentity = make(chan struct{})
+	)
+	e.UpdateController(controllerName,
+		controller.ControllerParams{
+			DoFunc: func(ctx context.Context) (err error) {
+				allocateCtx, cancel := context.WithTimeout(ctx, option.Config.KVstoreConnectivityTimeout)
+				defer cancel()
+				identity, _, err = e.allocator.AllocateIdentity(allocateCtx, l, true)
+				if err != nil {
+					return err
+				}
+				close(allocatedIdentity)
+				return nil
+			},
+		})
 
-	if err != nil {
-		scopedLog.WithError(err).Warn("Unable to restore endpoint")
-		return err
+	// Wait until we either get an identity or the endpoint is removed or
+	// deleted from the node.
+	select {
+	case <-e.aliveCtx.Done():
+		return ErrNotAlive
+	case <-allocatedIdentity:
 	}
 
 	// Wait for initial identities and ipcache from the
@@ -203,14 +288,36 @@ func (e *Endpoint) restoreIdentity() error {
 	// endpoints that don't have a fixed identity or are
 	// not well known.
 	if !identity.IsFixed() && !identity.IsWellKnown() {
-		identityCtx, cancel := context.WithTimeout(context.Background(), option.Config.KVstoreConnectivityTimeout)
-		defer cancel()
+		// Getting the initial global identities while we are restoring should
+		// block the restoring of the endpoint.
+		// If the endpoint is removed, this controller will cancel the allocator
+		// WaitForInitialGlobalIdentities function.
+		controllerName := fmt.Sprintf("waiting-initial-global-identities-ep (%v)", e.ID)
+		var gotInitialGlobalIdentities = make(chan struct{})
+		e.UpdateController(controllerName,
+			controller.ControllerParams{
+				DoFunc: func(ctx context.Context) (err error) {
+					identityCtx, cancel := context.WithTimeout(ctx, option.Config.KVstoreConnectivityTimeout)
+					defer cancel()
 
-		err = e.allocator.WaitForInitialGlobalIdentities(identityCtx)
-		if err != nil {
-			scopedLog.WithError(err).Warn("Failed while waiting for initial global identities")
-			return err
+					err = e.allocator.WaitForInitialGlobalIdentities(identityCtx)
+					if err != nil {
+						scopedLog.WithError(err).Warn("Failed while waiting for initial global identities")
+						return err
+					}
+					close(gotInitialGlobalIdentities)
+					return nil
+				},
+			})
+
+		// Wait until we either the initial global identities or the endpoint
+		// is deleted.
+		select {
+		case <-e.aliveCtx.Done():
+			return ErrNotAlive
+		case <-gotInitialGlobalIdentities:
 		}
+
 		if option.Config.KVStore != "" {
 			ipcache.WaitForKVStoreSync()
 		}
@@ -300,6 +407,7 @@ func (e *Endpoint) toSerializedEndpoint() *serializableEndpoint {
 		NodeMAC:               e.nodeMAC,
 		SecurityIdentity:      e.SecurityIdentity,
 		Options:               e.Options,
+		DNSRules:              e.DNSRules,
 		DNSHistory:            e.DNSHistory,
 		DNSZombies:            e.DNSZombies,
 		K8sPodName:            e.K8sPodName,
@@ -313,7 +421,7 @@ func (e *Endpoint) toSerializedEndpoint() *serializableEndpoint {
 //
 //
 // WARNING - STABLE API
-// This structure is written as JSON to StateDir/{ID}/lxc_config.h to allow to
+// This structure is written as JSON to StateDir/{ID}/ep_config.h to allow to
 // restore endpoints when the agent is being restarted. The restore operation
 // will read the file and re-create all endpoints with all fields which are not
 // marked as private to JSON marshal. Do NOT modify this structure in ways which
@@ -374,6 +482,9 @@ type serializableEndpoint struct {
 	// Options determine the datapath configuration of the endpoint.
 	Options *option.IntOptions
 
+	// DNSRules is the collection of current DNS rules for this endpoint.
+	DNSRules restore.DNSRules
+
 	// DNSHistory is the collection of still-valid DNS responses intercepted for
 	// this endpoint.
 	DNSHistory *fqdn.DNSCache
@@ -433,6 +544,7 @@ func (ep *Endpoint) fromSerializedEndpoint(r *serializableEndpoint) {
 	ep.IPv4 = r.IPv4
 	ep.nodeMAC = r.NodeMAC
 	ep.SecurityIdentity = r.SecurityIdentity
+	ep.DNSRules = r.DNSRules
 	ep.DNSHistory = r.DNSHistory
 	ep.DNSZombies = r.DNSZombies
 	ep.K8sPodName = r.K8sPodName

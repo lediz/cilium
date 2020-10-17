@@ -2,7 +2,7 @@
 
     WARNING: You are looking at unreleased Cilium documentation.
     Please use the official rendered version released here:
-    http://docs.cilium.io
+    https://docs.cilium.io
 
 .. _k8s_install_eks:
 
@@ -22,9 +22,9 @@ Prerequisites
 -------------
 
 Ensure your AWS credentials are located in ``~/.aws/credentials`` or are stored
-as `environment variables <https://docs.aws.amazon.com/cli/latest/userguide/cli-environment.html>`_ .
+as `environment variables <https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-envvars.html>`_ .
 
-Next, install `eksctl <https://github.com/weaveworks/eksctl>`_ :
+Next, install `eksctl`_ :
 
 .. tabs::
   .. group-tab:: Linux
@@ -49,16 +49,17 @@ Ensure that aws-iam-authenticator is installed and in the executable path:
 If not, install it based on the `AWS IAM authenticator documentation
 <https://docs.aws.amazon.com/eks/latest/userguide/install-aws-iam-authenticator.html>`_ .
 
+.. _eksctl: https://github.com/weaveworks/eksctl
+
 Create the cluster
 ------------------
 
-Create an EKS cluster with ``eksctl`` see the `eksctl Documentation
-<https://github.com/weaveworks/eksctl>`_ for details on how to set credentials,
-change region, VPC, cluster size, etc.
+Create an EKS cluster with ``eksctl`` see the `eksctl Documentation`_ for
+details on how to set credentials, change region, VPC, cluster size, etc.
 
    .. code:: bash
 
-     eksctl create cluster -n test-cluster -N 0
+     eksctl create cluster --name test-cluster --without-nodegroup
 
 You should see something like this:
 
@@ -69,18 +70,15 @@ You should see something like this:
 	[...]
 	[✔]  EKS cluster "test-cluster" in "us-west-2" region is ready
 
-Disable the aws-node DaemonSet (EKS only)
-=========================================
+.. _eksctl Documentation: eksctl_
 
-If you are running an EKS cluster, disable the ``aws-node`` DaemonSet so it
-does not interfere with the ENIs managed by Cilium:
+Delete VPC CNI (``aws-node`` DaemonSet)
+=======================================
 
-.. code:: bash
+.. include:: k8s-install-remove-aws-node.rst
 
-   kubectl -n kube-system set image daemonset/aws-node aws-node=docker.io/spaster/alpine-sleep
-
-Prepare & Deploy Cilium
-=======================
+Deploy Cilium
+=============
 
 .. include:: k8s-install-download-release.rst
 
@@ -90,27 +88,27 @@ Deploy Cilium release via Helm:
 
    helm install cilium |CHART_RELEASE| \\
      --namespace kube-system \\
-     --set global.eni=true \\
-     --set global.egressMasqueradeInterfaces=eth0 \\
-     --set global.tunnel=disabled \\
-     --set global.nodeinit.enabled=true
+     --set eni=true \\
+     --set ipam.mode=eni \\
+     --set egressMasqueradeInterfaces=eth0 \\
+     --set tunnel=disabled \\
+     --set nodeinit.enabled=true
 
-Scale up the cluster
-====================
+.. note::
 
-.. code:: bash
+   This helm command sets ``eni=true`` and ``tunnel=disabled``,
+   meaning that Cilium will allocate a fully-routable AWS ENI IP address for each pod,
+   similar to the behavior of the
+   `Amazon VPC CNI plugin <https://docs.aws.amazon.com/eks/latest/userguide/pod-networking.html>`_.
 
-    eksctl get nodegroup --cluster test-cluster
-    CLUSTER			NODEGROUP	CREATED			MIN SIZE	MAX SIZE	DESIRED CAPACITY	INSTANCE TYPE	IMAGE ID
-    test-cluster        	ng-25560078	2019-07-23T06:05:35Z	0		2		0			m5.large	ami-0923e4b35a30a5f53
+   Cilium can alternatively run in EKS using an overlay mode that gives pods non-VPC-routable IPs.
+   This allows running more pods per Kubernetes worker node than the ENI limit, but means
+   that pod connectivity to resources outside the cluster (e.g., VMs in the VPC or AWS managed
+   services) is masqueraded (i.e., SNAT) by Cilium to use the VPC IP address of the Kubernetes worker node.
+   Excluding the lines for ``eni=true`` and ``tunnel=disabled`` from the
+   helm command will configure Cilium to use overlay routing mode (which is the helm default).
 
-.. code:: bash
-
-    eksctl scale nodegroup --cluster test-cluster -n ng-25560078 -N 2
-    [ℹ]  scaling nodegroup stack "eksctl-test-cluster-nodegroup-ng-25560078" in cluster eksctl-test-cluster-cluster
-    [ℹ]  scaling nodegroup, desired capacity from 0 to 2
-
+.. include:: aws-create-nodegroup.rst
 .. include:: k8s-install-validate.rst
-.. include:: hubble-install.rst
-.. include:: getting-started-next-steps.rst
-
+.. include:: namespace-kube-system.rst
+.. include:: hubble-enable.rst

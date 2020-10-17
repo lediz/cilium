@@ -2,7 +2,7 @@
 
     WARNING: You are looking at unreleased Cilium documentation.
     Please use the official rendered version released here:
-    http://docs.cilium.io
+    https://docs.cilium.io
 
 .. _gsg_ipam_crd:
 
@@ -40,7 +40,7 @@ Enable CRD IPAM mode
 Create a CiliumNode CR
 ======================
 
-#. Import the following custom resource to make t
+#. Import the following custom resource to make IPs available in the Cilium agent.
 
    .. code-block:: yaml
 
@@ -50,7 +50,7 @@ Create a CiliumNode CR
              name: "k8s1"
            spec:
              ipam:
-               available:
+               pool:
                  192.168.1.1: {}
                  192.168.1.2: {}
                  192.168.1.3: {}
@@ -80,7 +80,7 @@ Create a CiliumNode CR
          [...]
        spec:
          ipam:
-           available:
+           pool:
              192.168.1.1: {}
              192.168.1.2: {}
              192.168.1.3: {}
@@ -92,3 +92,7 @@ Create a CiliumNode CR
                owner: router
              192.168.1.3:
                owner: health
+
+.. note::
+
+    At the moment only single IP addresses are allowed. CIDR's are not supported.

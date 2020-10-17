@@ -15,6 +15,7 @@
 package k8sTest
 
 import (
+	"context"
 	"fmt"
 
 	. "github.com/cilium/cilium/test/ginkgo-ext"
@@ -32,13 +33,13 @@ var _ = Describe("K8sHealthTest", func() {
 
 	BeforeAll(func() {
 		kubectl = helpers.CreateKubectl(helpers.K8s1VMName(), logger)
+
 		ciliumFilename = helpers.TimestampFilename("cilium.yaml")
 		DeployCiliumAndDNS(kubectl, ciliumFilename)
 	})
 
 	AfterFailed(func() {
-		kubectl.CiliumReport(helpers.CiliumNamespace,
-			"cilium endpoint list")
+		kubectl.CiliumReport("cilium endpoint list")
 	})
 
 	JustAfterEach(func() {
@@ -50,13 +51,12 @@ var _ = Describe("K8sHealthTest", func() {
 	})
 
 	AfterAll(func() {
-		kubectl.DeleteCiliumDS()
-		ExpectAllPodsTerminated(kubectl)
+		UninstallCiliumFromManifest(kubectl, ciliumFilename)
 		kubectl.CloseSSHClient()
 	})
 
 	getCilium := func(node string) (pod, ip string) {
-		pod, err := kubectl.GetCiliumPodOnNodeWithLabel(helpers.CiliumNamespace, node)
+		pod, err := kubectl.GetCiliumPodOnNodeWithLabel(node)
 		Expect(err).Should(BeNil())
 
 		res, err := kubectl.Get(
@@ -69,7 +69,7 @@ var _ = Describe("K8sHealthTest", func() {
 	}
 
 	checkIP := func(pod, ip string) {
-		jsonpath := fmt.Sprintf("{.nodes[*].host.primary-address.ip}")
+		jsonpath := "{.nodes[*].host.primary-address.ip}"
 		ciliumCmd := fmt.Sprintf("cilium-health status -o jsonpath='%s'", jsonpath)
 
 		err := kubectl.CiliumExecUntilMatch(pod, ciliumCmd, ip)
@@ -90,10 +90,9 @@ var _ = Describe("K8sHealthTest", func() {
 		checkIP(cilium2, cilium2IP)
 
 		By("checking that `cilium-health --probe` succeeds")
-		healthCmd := fmt.Sprintf("cilium-health status --probe -o json")
-		status := kubectl.CiliumExec(cilium1, healthCmd)
-		Expect(status.Output()).ShouldNot(ContainSubstring("error"))
-		status.ExpectSuccess()
+		healthCmd := "cilium-health status --probe -o json"
+		status := kubectl.CiliumExecMustSucceed(context.TODO(), cilium1, healthCmd)
+		Expect(status.Stdout()).ShouldNot(ContainSubstring("error"))
 
 		apiPaths := []string{
 			"endpoint.icmp",
@@ -103,8 +102,7 @@ var _ = Describe("K8sHealthTest", func() {
 		}
 		for node := 0; node <= 1; node++ {
 			healthCmd := "cilium-health status -o json"
-			status := kubectl.CiliumExec(cilium1, healthCmd)
-			status.ExpectSuccess("Cannot retrieve health status")
+			status := kubectl.CiliumExecMustSucceed(context.TODO(), cilium1, healthCmd, "Cannot retrieve health status")
 			for _, path := range apiPaths {
 				filter := fmt.Sprintf("{.nodes[%d].%s}", node, path)
 				By("checking API response for %q", filter)

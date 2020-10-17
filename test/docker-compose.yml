@@ -15,11 +15,11 @@ services:
     command: "etcd -name etcd0 -advertise-client-urls http://0.0.0.0:4002 -listen-client-urls http://0.0.0.0:4002 -initial-cluster-token etcd-cluster-1 -initial-cluster-state new"
     privileged: true
   base_image:
-    image: "quay.io/cilium/cilium-builder:2020-01-29"
+    image: "quay.io/cilium/cilium-builder:2020-10-15@sha256:97f6ab98d78747f2840966d71b7727c080d9f802d19c38104bf7b17b291358d0"
     volumes:
       - "./../:/go/src/github.com/cilium/cilium/"
     privileged: true
   precheck:
     extends:
       service: base_image
-    command: "bash -c 'cd /go/src/github.com/cilium/cilium/; make precheck || exit 1'"
+    command: "bash -c 'cd /go/src/github.com/cilium/cilium/; make ci-precheck || exit 1'"

@@ -24,20 +24,22 @@ import (
 	"path"
 	"time"
 
+	fakeDatapath "github.com/cilium/cilium/pkg/datapath/fake"
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/identity/cache"
 	"github.com/cilium/cilium/pkg/k8s"
-	"github.com/cilium/cilium/pkg/k8s/types"
+	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/core/v1"
+	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
 	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/lock"
+	fakeConfig "github.com/cilium/cilium/pkg/option/fake"
+	"github.com/cilium/cilium/pkg/rand"
 	"github.com/cilium/cilium/pkg/testutils"
 	"github.com/cilium/cilium/pkg/testutils/allocator"
 
 	. "gopkg.in/check.v1"
-	"k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 var etcdConfig = []byte(fmt.Sprintf("endpoints:\n- %s\n", kvstore.EtcdDummyAddress()))
@@ -62,11 +64,11 @@ var (
 func (s *ClusterMeshServicesTestSuite) SetUpTest(c *C) {
 	kvstore.SetupDummy("etcd")
 
-	s.randomName = testutils.RandomRune()
+	s.randomName = rand.RandomString()
 
-	kvstore.DeletePrefix(context.TODO(), "cilium/state/services/v1/"+s.randomName)
-	s.svcCache = k8s.NewServiceCache()
-	identity.InitWellKnownIdentities()
+	kvstore.Client().DeletePrefix(context.TODO(), "cilium/state/services/v1/"+s.randomName)
+	s.svcCache = k8s.NewServiceCache(fakeDatapath.NewNodeAddressing())
+	identity.InitWellKnownIdentities(&fakeConfig.Config{})
 
 	mgr := cache.NewCachingIdentityAllocator(&allocator.IdentityAllocatorOwnerMock{})
 	// The nils are only used by k8s CRD identities. We default to kvstore.
@@ -109,8 +111,8 @@ func (s *ClusterMeshServicesTestSuite) TearDownTest(c *C) {
 	}
 
 	os.RemoveAll(s.testDir)
-	kvstore.DeletePrefix(context.TODO(), "cilium/state/services/v1/"+s.randomName)
-	kvstore.Close()
+	kvstore.Client().DeletePrefix(context.TODO(), "cilium/state/services/v1/"+s.randomName)
+	kvstore.Client().Close()
 }
 
 func (s *ClusterMeshServicesTestSuite) expectEvent(c *C, action k8s.CacheAction, id k8s.ServiceID, fn func(event k8s.ServiceEvent) bool) {
@@ -137,24 +139,22 @@ func (s *ClusterMeshServicesTestSuite) expectEvent(c *C, action k8s.CacheAction,
 
 func (s *ClusterMeshServicesTestSuite) TestClusterMeshServicesGlobal(c *C) {
 	k, v := s.prepareServiceUpdate("1", "10.0.185.196", "http", "80")
-	kvstore.Set(context.TODO(), k, v)
+	kvstore.Client().Set(context.TODO(), k, []byte(v))
 	k, v = s.prepareServiceUpdate("2", "20.0.185.196", "http2", "90")
-	kvstore.Set(context.TODO(), k, v)
+	kvstore.Client().Set(context.TODO(), k, []byte(v))
 
 	swgSvcs := lock.NewStoppableWaitGroup()
-	k8sSvc := &types.Service{
-		Service: &v1.Service{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "foo",
-				Namespace: "default",
-				Annotations: map[string]string{
-					"io.cilium/global-service": "true",
-				},
+	k8sSvc := &slim_corev1.Service{
+		ObjectMeta: slim_metav1.ObjectMeta{
+			Name:      "foo",
+			Namespace: "default",
+			Annotations: map[string]string{
+				"io.cilium/global-service": "true",
 			},
-			Spec: v1.ServiceSpec{
-				ClusterIP: "127.0.0.1",
-				Type:      v1.ServiceTypeClusterIP,
-			},
+		},
+		Spec: slim_corev1.ServiceSpec{
+			ClusterIP: "127.0.0.1",
+			Type:      slim_corev1.ServiceTypeClusterIP,
 		},
 	}
 
@@ -165,21 +165,19 @@ func (s *ClusterMeshServicesTestSuite) TestClusterMeshServicesGlobal(c *C) {
 			event.Endpoints.Backends["20.0.185.196"] != nil
 	})
 
-	k8sEndpoints := &types.Endpoints{
-		Endpoints: &v1.Endpoints{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "foo",
-				Namespace: "default",
-			},
-			Subsets: []v1.EndpointSubset{
-				{
-					Addresses: []v1.EndpointAddress{{IP: "30.0.185.196"}},
-					Ports: []v1.EndpointPort{
-						{
-							Name:     "http",
-							Port:     100,
-							Protocol: v1.ProtocolTCP,
-						},
+	k8sEndpoints := &slim_corev1.Endpoints{
+		ObjectMeta: slim_metav1.ObjectMeta{
+			Name:      "foo",
+			Namespace: "default",
+		},
+		Subsets: []slim_corev1.EndpointSubset{
+			{
+				Addresses: []slim_corev1.EndpointAddress{{IP: "30.0.185.196"}},
+				Ports: []slim_corev1.EndpointPort{
+					{
+						Name:     "http",
+						Port:     100,
+						Protocol: slim_corev1.ProtocolTCP,
 					},
 				},
 			},
@@ -197,10 +195,10 @@ func (s *ClusterMeshServicesTestSuite) TestClusterMeshServicesGlobal(c *C) {
 		return event.Endpoints.Backends["30.0.185.196"] == nil
 	})
 
-	kvstore.DeletePrefix(context.TODO(), "cilium/state/services/v1/"+s.randomName+"1")
+	kvstore.Client().DeletePrefix(context.TODO(), "cilium/state/services/v1/"+s.randomName+"1")
 	s.expectEvent(c, k8s.UpdateService, svcID, nil)
 
-	kvstore.DeletePrefix(context.TODO(), "cilium/state/services/v1/"+s.randomName+"2")
+	kvstore.Client().DeletePrefix(context.TODO(), "cilium/state/services/v1/"+s.randomName+"2")
 	s.expectEvent(c, k8s.DeleteService, svcID, nil)
 
 	swgSvcs.Stop()
@@ -218,23 +216,21 @@ func (s *ClusterMeshServicesTestSuite) TestClusterMeshServicesGlobal(c *C) {
 
 func (s *ClusterMeshServicesTestSuite) TestClusterMeshServicesUpdate(c *C) {
 	k, v := s.prepareServiceUpdate("1", "10.0.185.196", "http", "80")
-	kvstore.Set(context.TODO(), k, v)
+	kvstore.Client().Set(context.TODO(), k, []byte(v))
 	k, v = s.prepareServiceUpdate("2", "20.0.185.196", "http2", "90")
-	kvstore.Set(context.TODO(), k, v)
+	kvstore.Client().Set(context.TODO(), k, []byte(v))
 
-	k8sSvc := &types.Service{
-		Service: &v1.Service{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "foo",
-				Namespace: "default",
-				Annotations: map[string]string{
-					"io.cilium/global-service": "true",
-				},
+	k8sSvc := &slim_corev1.Service{
+		ObjectMeta: slim_metav1.ObjectMeta{
+			Name:      "foo",
+			Namespace: "default",
+			Annotations: map[string]string{
+				"io.cilium/global-service": "true",
 			},
-			Spec: v1.ServiceSpec{
-				ClusterIP: "127.0.0.1",
-				Type:      v1.ServiceTypeClusterIP,
-			},
+		},
+		Spec: slim_corev1.ServiceSpec{
+			ClusterIP: "127.0.0.1",
+			Type:      slim_corev1.ServiceTypeClusterIP,
 		},
 	}
 
@@ -251,26 +247,26 @@ func (s *ClusterMeshServicesTestSuite) TestClusterMeshServicesUpdate(c *C) {
 	})
 
 	k, v = s.prepareServiceUpdate("1", "80.0.185.196", "http", "8080")
-	kvstore.Set(context.TODO(), k, v)
+	kvstore.Client().Set(context.TODO(), k, []byte(v))
 	s.expectEvent(c, k8s.UpdateService, svcID, func(event k8s.ServiceEvent) bool {
 		return event.Endpoints.Backends["80.0.185.196"] != nil &&
 			event.Endpoints.Backends["20.0.185.196"] != nil
 	})
 
 	k, v = s.prepareServiceUpdate("2", "90.0.185.196", "http", "8080")
-	kvstore.Set(context.TODO(), k, v)
+	kvstore.Client().Set(context.TODO(), k, []byte(v))
 	s.expectEvent(c, k8s.UpdateService, svcID, func(event k8s.ServiceEvent) bool {
 		return event.Endpoints.Backends["80.0.185.196"] != nil &&
 			event.Endpoints.Backends["90.0.185.196"] != nil
 	})
 
-	kvstore.DeletePrefix(context.TODO(), "cilium/state/services/v1/"+s.randomName+"1")
+	kvstore.Client().DeletePrefix(context.TODO(), "cilium/state/services/v1/"+s.randomName+"1")
 	// The observer will have a defaults.NodeDeleteDelay time before it receives
 	// the event. For this reason we will trigger the delete events sequentially
 	// and only do the assertion in the end. This way we wait 30seconds for the
 	// test to complete instead of 30+30 seconds.
 	time.Sleep(2 * time.Second)
-	kvstore.DeletePrefix(context.TODO(), "cilium/state/services/v1/"+s.randomName+"2")
+	kvstore.Client().DeletePrefix(context.TODO(), "cilium/state/services/v1/"+s.randomName+"2")
 
 	s.expectEvent(c, k8s.UpdateService, svcID, nil)
 	s.expectEvent(c, k8s.DeleteService, svcID, nil)
@@ -284,21 +280,19 @@ func (s *ClusterMeshServicesTestSuite) TestClusterMeshServicesUpdate(c *C) {
 
 func (s *ClusterMeshServicesTestSuite) TestClusterMeshServicesNonGlobal(c *C) {
 	k, v := s.prepareServiceUpdate("1", "10.0.185.196", "http", "80")
-	kvstore.Set(context.TODO(), k, v)
+	kvstore.Client().Set(context.TODO(), k, []byte(v))
 	k, v = s.prepareServiceUpdate("2", "20.0.185.196", "http2", "90")
-	kvstore.Set(context.TODO(), k, v)
+	kvstore.Client().Set(context.TODO(), k, []byte(v))
 
-	k8sSvc := &types.Service{
-		Service: &v1.Service{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "foo",
-				Namespace: "default",
-				// shared annotation is NOT set
-			},
-			Spec: v1.ServiceSpec{
-				ClusterIP: "127.0.0.1",
-				Type:      v1.ServiceTypeClusterIP,
-			},
+	k8sSvc := &slim_corev1.Service{
+		ObjectMeta: slim_metav1.ObjectMeta{
+			Name:      "foo",
+			Namespace: "default",
+			// shared annotation is NOT set
+		},
+		Spec: slim_corev1.ServiceSpec{
+			ClusterIP: "127.0.0.1",
+			Type:      slim_corev1.ServiceTypeClusterIP,
 		},
 	}
 

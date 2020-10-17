@@ -47,11 +47,11 @@ type ImportImageInput struct {
 	// Valid values: xen
 	Hypervisor *string `type:"string"`
 
-	// An identifier for the AWS Key Management Service (AWS KMS) customer master
-	// key (CMK) to use when creating the encrypted AMI. This parameter is only
-	// required if you want to use a non-default CMK; if this parameter is not specified,
-	// the default CMK for EBS is used. If a KmsKeyId is specified, the Encrypted
-	// flag must also be set.
+	// An identifier for the symmetric AWS Key Management Service (AWS KMS) customer
+	// master key (CMK) to use when creating the encrypted AMI. This parameter is
+	// only required if you want to use a non-default CMK; if this parameter is
+	// not specified, the default CMK for EBS is used. If a KmsKeyId is specified,
+	// the Encrypted flag must also be set.
 	//
 	// The CMK identifier may be provided in any of the following formats:
 	//
@@ -74,6 +74,8 @@ type ImportImageInput struct {
 	// will eventually report failure.
 	//
 	// The specified CMK must exist in the Region that the AMI is being copied to.
+	//
+	// Amazon EBS does not support asymmetric CMKs.
 	KmsKeyId *string `type:"string"`
 
 	// The ARNs of the license configurations.
@@ -99,6 +101,9 @@ type ImportImageInput struct {
 
 	// The name of the role to use when not using the default role, 'vmimport'.
 	RoleName *string `type:"string"`
+
+	// The tags to apply to the image being imported.
+	TagSpecifications []TagSpecification `locationName:"TagSpecification" locationNameList:"item" type:"list"`
 }
 
 // String returns the string representation
@@ -115,7 +120,7 @@ type ImportImageOutput struct {
 	// A description of the import task.
 	Description *string `locationName:"description" type:"string"`
 
-	// Indicates whether the AMI is encypted.
+	// Indicates whether the AMI is encrypted.
 	Encrypted *bool `locationName:"encrypted" type:"boolean"`
 
 	// The target hypervisor of the import task.
@@ -127,8 +132,8 @@ type ImportImageOutput struct {
 	// The task ID of the import image task.
 	ImportTaskId *string `locationName:"importTaskId" type:"string"`
 
-	// The identifier for the AWS Key Management Service (AWS KMS) customer master
-	// key (CMK) that was used to create the encrypted AMI.
+	// The identifier for the symmetric AWS Key Management Service (AWS KMS) customer
+	// master key (CMK) that was used to create the encrypted AMI.
 	KmsKeyId *string `locationName:"kmsKeyId" type:"string"`
 
 	// The ARNs of the license configurations.
@@ -151,6 +156,9 @@ type ImportImageOutput struct {
 
 	// A detailed status message of the import task.
 	StatusMessage *string `locationName:"statusMessage" type:"string"`
+
+	// Any tags assigned to the image being imported.
+	Tags []Tag `locationName:"tagSet" locationNameList:"item" type:"list"`
 }
 
 // String returns the string representation
@@ -188,6 +196,7 @@ func (c *Client) ImportImageRequest(input *ImportImageInput) ImportImageRequest 
 	}
 
 	req := c.newRequest(op, input, &ImportImageOutput{})
+
 	return ImportImageRequest{Request: req, Input: input, Copy: c.ImportImageRequest}
 }
 

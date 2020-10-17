@@ -1,4 +1,4 @@
-// Copyright 2016-2017 Authors of Cilium
+// Copyright 2016-2020 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -44,12 +44,20 @@ type AllocationResult struct {
 	// If the allocated IP is derived from a VPC, then the gateway
 	// represented the gateway of the VPC or VPC subnet.
 	GatewayIP string
+
+	// ExpirationUUID is the UUID of the expiration timer. This field is
+	// only set if AllocateNextWithExpiration is used.
+	ExpirationUUID string
 }
 
 // Allocator is the interface for an IP allocator implementation
 type Allocator interface {
 	// Allocate allocates a specific IP or fails
 	Allocate(ip net.IP, owner string) (*AllocationResult, error)
+
+	// AllocateWithoutSyncUpstream allocates a specific IP without syncing
+	// upstream or fails
+	AllocateWithoutSyncUpstream(ip net.IP, owner string) (*AllocationResult, error)
 
 	// Release releases a previously allocated IP or fails
 	Release(ip net.IP) error
@@ -58,18 +66,18 @@ type Allocator interface {
 	// are available
 	AllocateNext(owner string) (*AllocationResult, error)
 
+	// AllocateNextWithoutSyncUpstream allocates the next available IP without syncing
+	// upstream or fails if no more IPs are available
+	AllocateNextWithoutSyncUpstream(owner string) (*AllocationResult, error)
+
 	// Dump returns a map of all allocated IPs with the IP represented as
 	// key in the map. Dump must also provide a status one-liner to
 	// represent the overall status, e.g. number of IPs allocated and
 	// overall health information if available.
 	Dump() (map[string]string, string)
-}
 
-// IPNetWithOwner is a structure containing a net.IPNet struct with the owner
-// of that IP Network.
-type IPNetWithOwner struct {
-	ipNet net.IPNet
-	owner string
+	// RestoreFinished marks the status of restoration as done
+	RestoreFinished()
 }
 
 // IPBlacklist is a structure used to store information related to blacklisted
@@ -77,12 +85,9 @@ type IPNetWithOwner struct {
 type IPBlacklist struct {
 	// A hashmap containing IP and the corresponding owners.
 	ips map[string]string
-
-	// A list of IPNetwork with owners, for blacklisting subnets.
-	ipNets []*IPNetWithOwner
 }
 
-// Config is the IPAM configuration used for a particular IPAM type.
+// IPAM is the configuration used for a particular IPAM type.
 type IPAM struct {
 	nodeAddressing datapath.NodeAddressing
 	config         Configuration
@@ -92,6 +97,11 @@ type IPAM struct {
 
 	// owner maps an IP to the owner
 	owner map[string]string
+
+	// expirationTimers is a map of all expiration timers. Each entry
+	// represents a IP allocation which is protected by an expiration
+	// timer.
+	expirationTimers map[string]string
 
 	// mutex covers access to all members of this struct
 	allocatorMutex lock.RWMutex

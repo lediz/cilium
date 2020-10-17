@@ -2,7 +2,7 @@
 
     WARNING: You are looking at unreleased Cilium documentation.
     Please use the official rendered version released here:
-    http://docs.cilium.io
+    https://docs.cilium.io
 
 *******
 AWS-CNI
@@ -11,7 +11,7 @@ AWS-CNI
 This guide explains how to set up Cilium in combination with aws-cni. In this
 hybrid mode, the aws-cni plugin is responsible for setting up the virtual
 network devices as well as address allocation (IPAM) via ENI. After the initial
-networking is setup, the Cilium CNI plugin is called to attach BPF programs to
+networking is setup, the Cilium CNI plugin is called to attach eBPF programs to
 the network devices set up by aws-cni to enforce network policies, perform
 load-balancing, and encryption.
 
@@ -37,10 +37,10 @@ Deploy Cilium release via Helm:
 
    helm install cilium |CHART_RELEASE| \\
      --namespace kube-system \\
-     --set global.cni.chainingMode=aws-cni \\
-     --set global.masquerade=false \\
-     --set global.tunnel=disabled \\
-     --set global.nodeinit.enabled=true
+     --set cni.chainingMode=aws-cni \\
+     --set masquerade=false \\
+     --set tunnel=disabled \\
+     --set nodeinit.enabled=true
 
 This will enable chaining with the aws-cni plugin. It will also disable
 tunneling. Tunneling is not required as ENI IP addresses can be directly routed
@@ -60,6 +60,6 @@ If you are unsure if a pod is managed by Cilium or not, run ``kubectl get cep``
 in the respective namespace and see if the pod is listed.
 
 .. include:: k8s-install-validate.rst
-.. include:: hubble-install.rst
-.. include:: getting-started-next-steps.rst
+.. include:: namespace-kube-system.rst
+.. include:: hubble-enable.rst
 

@@ -66,6 +66,9 @@ type CreateNetworkInterfaceInput struct {
 	//
 	// SubnetId is a required field
 	SubnetId *string `locationName:"subnetId" type:"string" required:"true"`
+
+	// The tags to apply to the new network interface.
+	TagSpecifications []TagSpecification `locationName:"TagSpecification" locationNameList:"item" type:"list"`
 }
 
 // String returns the string representation
@@ -131,6 +134,7 @@ func (c *Client) CreateNetworkInterfaceRequest(input *CreateNetworkInterfaceInpu
 	}
 
 	req := c.newRequest(op, input, &CreateNetworkInterfaceOutput{})
+
 	return CreateNetworkInterfaceRequest{Request: req, Input: input, Copy: c.CreateNetworkInterfaceRequest}
 }
 

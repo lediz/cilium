@@ -15,11 +15,10 @@
 package linux
 
 import (
+	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -30,6 +29,7 @@ import (
 	"github.com/cilium/cilium/pkg/versioncheck"
 
 	go_version "github.com/blang/semver"
+	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
 
@@ -105,36 +105,6 @@ func getClangVersion(filePath string) (go_version.Version, error) {
 	return versioncheck.Version(v)
 }
 
-func checkBPFLogs(logType string, fatal bool) {
-	bpfLogFile := logType + ".log"
-	bpfLogPath := filepath.Join(option.Config.StateDir, bpfLogFile)
-
-	if _, err := os.Stat(bpfLogPath); os.IsNotExist(err) {
-		log.Infof("%s check: OK!", logType)
-	} else if err == nil {
-		bpfFeaturesLog, err := ioutil.ReadFile(bpfLogPath)
-		if err != nil {
-			log.WithError(err).WithField(logfields.Path, bpfLogPath).Fatalf("%s check: NOT OK. Unable to read", logType)
-		}
-		printer := log.Debugf
-		if fatal {
-			printer = log.Errorf
-			printer("%s check: NOT OK", logType)
-		} else {
-			printer("%s check: Some features may be limited:", logType)
-		}
-		lines := strings.Trim(string(bpfFeaturesLog), "\n")
-		for _, line := range strings.Split(lines, "\n") {
-			printer(line)
-		}
-		if fatal {
-			log.Fatalf("%s check failed.", logType)
-		}
-	} else {
-		log.WithError(err).WithField(logfields.Path, bpfLogPath).Fatalf("%s check: NOT OK. Unable to read", logType)
-	}
-}
-
 // CheckMinRequirements checks that minimum kernel requirements are met for
 // configuring the BPF datapath. If not, fatally exits.
 func CheckMinRequirements() {
@@ -145,6 +115,12 @@ func CheckMinRequirements() {
 	if !isMinKernelVer(kernelVersion) {
 		log.Fatalf("kernel version: NOT OK: minimal supported kernel "+
 			"version is %s; kernel version that is running is: %s", minKernelVer, kernelVersion)
+	}
+
+	_, err = netlink.RuleList(netlink.FAMILY_V4)
+	if errors.Is(err, unix.EAFNOSUPPORT) {
+		log.WithError(err).Error("Policy routing:NOT OK. " +
+			"Please enable kernel configuration item CONFIG_IP_MULTIPLE_TABLES")
 	}
 
 	if option.Config.EnableIPv6 {
@@ -183,16 +159,6 @@ func CheckMinRequirements() {
 				log.Warn("llc version was compiled in debug mode, expect higher latency!")
 			}
 		}
-		// /usr/include/gnu/stubs-32.h is installed by 'glibc-devel.i686' in fedora
-		// /usr/include/sys/cdefs.h is installed by 'libc6-dev-i386' in ubuntu
-		// both files exist on both systems but cdefs.h already exists in fedora
-		// without 'glibc-devel.i686' so we check for 'stubs-32.h first.
-		if _, err := os.Stat("/usr/include/gnu/stubs-32.h"); os.IsNotExist(err) {
-			log.Fatal("linking environment: NOT OK, please make sure you have 'glibc-devel.i686' if you use fedora system or 'libc6-dev-i386' if you use ubuntu system")
-		}
-		if _, err := os.Stat("/usr/include/sys/cdefs.h"); os.IsNotExist(err) {
-			log.Fatal("linking environment: NOT OK, please make sure you have 'libc6-dev-i386' in your ubuntu system")
-		}
 		log.Info("linking environment: OK!")
 	}
 
@@ -203,23 +169,23 @@ func CheckMinRequirements() {
 	if err := os.Chdir(option.Config.LibDir); err != nil {
 		log.WithError(err).WithField(logfields.Path, option.Config.LibDir).Fatal("Could not change to runtime directory")
 	}
-	probeScript := filepath.Join(option.Config.BpfDir, "run_probes.sh")
-	if err := exec.Command(probeScript, option.Config.BpfDir, option.Config.StateDir).Run(); err != nil {
-		log.WithError(err).Fatal("BPF Verifier: NOT OK. Unable to run checker for bpf_features")
+	if _, err := os.Stat(option.Config.BpfDir); os.IsNotExist(err) {
+		log.WithError(err).Fatalf("BPF template directory: NOT OK. Please run 'make install-bpf'")
 	}
-	featuresFilePath := filepath.Join(globalsDir, "bpf_features.h")
-	if _, err := os.Stat(featuresFilePath); os.IsNotExist(err) {
-		log.WithError(err).WithField(logfields.Path, globalsDir).Fatal("BPF Verifier: NOT OK. Unable to read bpf_features.h")
-	}
-
-	checkBPFLogs("bpf_requirements", true)
-	checkBPFLogs("bpf_features", false)
 
 	// bpftool checks
 	if !option.Config.DryMode {
 		probeManager := probes.NewProbeManager()
 		if err := probeManager.SystemConfigProbes(); err != nil {
-			log.WithError(err).Warning("BPF system config check: NOT OK.")
+			errMsg := "BPF system config check: NOT OK."
+			if errors.Is(err, probes.ErrKernelConfigNotFound) {
+				log.WithError(err).Info(errMsg)
+			} else {
+				log.WithError(err).Warn(errMsg)
+			}
+		}
+		if err := probeManager.CreateHeadersFile(); err != nil {
+			log.WithError(err).Fatal("BPF check: NOT OK.")
 		}
 	}
 }

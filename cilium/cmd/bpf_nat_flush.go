@@ -18,7 +18,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/cilium/cilium/common"
+	"github.com/cilium/cilium/pkg/common"
 	"github.com/cilium/cilium/pkg/maps/nat"
 
 	"github.com/spf13/cobra"
@@ -50,8 +50,11 @@ func flushNat() {
 			err = m.Open()
 		}
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Unable to open %s: %s", path, err)
-			continue
+			if os.IsNotExist(err) {
+				fmt.Fprintf(os.Stderr, "Unable to open %s: %s. Skipping.\n", path, err)
+				continue
+			}
+			Fatalf("Unable to open %s: %s", path, err)
 		}
 		defer m.Close()
 		entries := m.Flush()

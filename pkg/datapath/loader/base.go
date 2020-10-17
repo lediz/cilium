@@ -1,4 +1,4 @@
-// Copyright 2016-2019 Authors of Cilium
+// Copyright 2016-2020 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,16 +20,22 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 
-	"github.com/cilium/cilium/common"
 	"github.com/cilium/cilium/pkg/bpf"
+	"github.com/cilium/cilium/pkg/byteorder"
 	"github.com/cilium/cilium/pkg/cgroups"
 	"github.com/cilium/cilium/pkg/command/exec"
+	"github.com/cilium/cilium/pkg/common"
 	"github.com/cilium/cilium/pkg/datapath"
 	"github.com/cilium/cilium/pkg/datapath/alignchecker"
+	"github.com/cilium/cilium/pkg/datapath/linux/linux_defaults"
+	"github.com/cilium/cilium/pkg/datapath/linux/route"
+	datapathOption "github.com/cilium/cilium/pkg/datapath/option"
 	"github.com/cilium/cilium/pkg/datapath/prefilter"
 	"github.com/cilium/cilium/pkg/defaults"
+	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
@@ -44,23 +50,40 @@ const (
 	initArgIPv4NodeIP
 	initArgIPv6NodeIP
 	initArgMode
-	initArgDevice
-	initArgDevicePreFilter
-	initArgModePreFilter
+	initArgDevices
+	initArgXDPDevice
+	initArgXDPMode
 	initArgMTU
 	initArgIPSec
-	initArgMasquerade
 	initArgEncryptInterface
 	initArgHostReachableServices
 	initArgHostReachableServicesUDP
+	initArgHostReachableServicesPeer
 	initArgCgroupRoot
 	initArgBpffsRoot
 	initArgNodePort
+	initArgNodePortBind
+	initBPFCPU
+	initArgNodePortIPv4Addrs
+	initArgNodePortIPv6Addrs
+	initArgNrCPUs
+	initArgEndpointRoutes
 	initArgMax
 )
 
+// firstInitialization is true when Reinitialize() is called for the first
+// time. It can only be accessed when GetCompilationLock() is being held.
+var firstInitialization = true
+
+const (
+	// netdevHeaderFileName is the name of the header file used for bpf_host.c and bpf_overlay.c.
+	netdevHeaderFileName = "netdev_config.h"
+	// preFilterHeaderFileName is the name of the header file used for bpf_xdp.c.
+	preFilterHeaderFileName = "filter_config.h"
+)
+
 func (l *Loader) writeNetdevHeader(dir string, o datapath.BaseProgramOwner) error {
-	headerPath := filepath.Join(dir, common.NetdevHeaderFileName)
+	headerPath := filepath.Join(dir, netdevHeaderFileName)
 	log.WithField(logfields.Path, headerPath).Debug("writing configuration")
 
 	f, err := os.Create(headerPath)
@@ -78,7 +101,7 @@ func (l *Loader) writeNetdevHeader(dir string, o datapath.BaseProgramOwner) erro
 
 // Must be called with option.Config.EnablePolicyMU locked.
 func writePreFilterHeader(preFilter *prefilter.PreFilter, dir string) error {
-	headerPath := filepath.Join(dir, common.PreFilterHeaderFileName)
+	headerPath := filepath.Join(dir, preFilterHeaderFileName)
 	log.WithField(logfields.Path, headerPath).Debug("writing configuration")
 	f, err := os.Create(headerPath)
 	if err != nil {
@@ -95,22 +118,65 @@ func writePreFilterHeader(preFilter *prefilter.PreFilter, dir string) error {
 	return fw.Flush()
 }
 
+type setting struct {
+	name      string
+	val       string
+	ignoreErr bool
+}
+
+func addENIRules(sysSettings []setting) ([]setting, error) {
+	// AWS ENI mode requires symmetric routing, see
+	// iptables.addCiliumENIRules().
+	// The default AWS daemonset installs the following rules that are used
+	// for NodePort traffic between nodes:
+	//
+	// # sysctl -w net.ipv4.conf.eth0.rp_filter=2
+	// # iptables -t mangle -A PREROUTING -i eth0 -m comment --comment "AWS, primary ENI" -m addrtype --dst-type LOCAL --limit-iface-in -j CONNMARK --set-xmark 0x80/0x80
+	// # iptables -t mangle -A PREROUTING -i eni+ -m comment --comment "AWS, primary ENI" -j CONNMARK --restore-mark --nfmask 0x80 --ctmask 0x80
+	// # ip rule add fwmark 0x80/0x80 lookup main
+	//
+	// It marks packets coming from another node through eth0, and restores
+	// the mark on the return path to force a lookup into the main routing
+	// table. Without these rules, the "ip rules" set by the cilium-cni
+	// plugin tell the host to lookup into the table related to the VPC for
+	// which the CIDR used by the endpoint has been configured.
+	//
+	// We want to reproduce equivalent rules to ensure correct routing.
+	if !option.Config.EnableIPv4 {
+		return sysSettings, nil
+	}
+
+	iface, err := route.NodeDeviceWithDefaultRoute(option.Config.EnableIPv4, option.Config.EnableIPv6)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find interface with default route: %w", err)
+	}
+
+	retSettings := append(sysSettings, setting{
+		fmt.Sprintf("net.ipv4.conf.%s.rp_filter", iface.Attrs().Name),
+		"2",
+		false,
+	})
+	if err := route.ReplaceRule(route.Rule{
+		Priority: linux_defaults.RulePriorityNodeport,
+		Mark:     linux_defaults.MarkMultinodeNodeport,
+		Mask:     linux_defaults.MaskMultinodeNodeport,
+		Table:    route.MainTable,
+	}); err != nil {
+		return nil, fmt.Errorf("unable to install ip rule for ENI multi-node NodePort: %w", err)
+	}
+
+	return retSettings, nil
+}
+
 // Reinitialize (re-)configures the base datapath configuration including global
 // BPF programs, netfilter rule configuration and reserving routes in IPAM for
 // locally detected prefixes. It may be run upon initial Cilium startup, after
 // restore from a previous Cilium run, or during regular Cilium operation.
-func (l *Loader) Reinitialize(ctx context.Context, o datapath.BaseProgramOwner, deviceMTU int, iptMgr datapath.IptablesManager, p datapath.Proxy, r datapath.RouteReserver) error {
+func (l *Loader) Reinitialize(ctx context.Context, o datapath.BaseProgramOwner, deviceMTU int, iptMgr datapath.IptablesManager, p datapath.Proxy) error {
 	var (
 		args []string
-		mode string
 		ret  error
 	)
-
-	type setting struct {
-		name      string
-		val       string
-		ignoreErr bool
-	}
 
 	args = make([]string, initArgMax)
 
@@ -118,11 +184,13 @@ func (l *Loader) Reinitialize(ctx context.Context, o datapath.BaseProgramOwner, 
 		{"net.core.bpf_jit_enable", "1", true},
 		{"net.ipv4.conf.all.rp_filter", "0", false},
 		{"kernel.unprivileged_bpf_disabled", "1", true},
+		{"kernel.timer_migration", "0", true},
 	}
 
 	// Lock so that endpoints cannot be built while we are compile base programs.
 	o.GetCompilationLock().Lock()
 	defer o.GetCompilationLock().Unlock()
+	defer func() { firstInitialization = false }()
 
 	l.init(o.Datapath(), o.LocalConfig())
 
@@ -131,14 +199,17 @@ func (l *Loader) Reinitialize(ctx context.Context, o datapath.BaseProgramOwner, 
 		return err
 	}
 
-	scopedLog := log.WithField(logfields.XDPDevice, option.Config.DevicePreFilter)
-	if option.Config.DevicePreFilter != "undefined" {
-		if err := prefilter.ProbePreFilter(option.Config.DevicePreFilter, option.Config.ModePreFilter); err != nil {
-			scopedLog.WithError(err).Warn("Turning off prefilter")
-			option.Config.DevicePreFilter = "undefined"
-		}
+	if option.Config.XDPDevice != "undefined" {
+		args[initArgXDPDevice] = option.Config.XDPDevice
+		args[initArgXDPMode] = option.Config.XDPMode
+	} else {
+		args[initArgXDPDevice] = "<nil>"
+		args[initArgXDPMode] = "<nil>"
 	}
+
 	if option.Config.DevicePreFilter != "undefined" {
+		scopedLog := log.WithField(logfields.XDPDevice, option.Config.XDPDevice)
+
 		preFilter, err := prefilter.NewPreFilter()
 		if err != nil {
 			scopedLog.WithError(ret).Warn("Unable to init prefilter")
@@ -151,9 +222,6 @@ func (l *Loader) Reinitialize(ctx context.Context, o datapath.BaseProgramOwner, 
 		}
 
 		o.SetPrefilter(preFilter)
-
-		args[initArgDevicePreFilter] = option.Config.DevicePreFilter
-		args[initArgModePreFilter] = option.Config.ModePreFilter
 	}
 
 	args[initArgLib] = option.Config.BpfDir
@@ -186,12 +254,6 @@ func (l *Loader) Reinitialize(ctx context.Context, o datapath.BaseProgramOwner, 
 		args[initArgIPSec] = "false"
 	}
 
-	if !option.Config.InstallIptRules && option.Config.Masquerade {
-		args[initArgMasquerade] = "true"
-	} else {
-		args[initArgMasquerade] = "false"
-	}
-
 	if option.Config.EnableHostReachableServices {
 		args[initArgHostReachableServices] = "true"
 		if option.Config.EnableHostServicesUDP {
@@ -199,55 +261,112 @@ func (l *Loader) Reinitialize(ctx context.Context, o datapath.BaseProgramOwner, 
 		} else {
 			args[initArgHostReachableServicesUDP] = "false"
 		}
+		if option.Config.EnableHostServicesPeer {
+			args[initArgHostReachableServicesPeer] = "true"
+		} else {
+			args[initArgHostReachableServicesPeer] = "false"
+		}
 	} else {
 		args[initArgHostReachableServices] = "false"
 		args[initArgHostReachableServicesUDP] = "false"
+		args[initArgHostReachableServicesPeer] = "false"
 	}
 
 	if option.Config.EncryptInterface != "" {
 		args[initArgEncryptInterface] = option.Config.EncryptInterface
-	}
-
-	if option.Config.Device != "undefined" {
-		_, err := netlink.LinkByName(option.Config.Device)
-		if err != nil {
-			log.WithError(err).WithField("device", option.Config.Device).Warn("Link does not exist")
-			return err
-		}
-
-		if option.Config.DatapathMode == option.DatapathModeIpvlan {
-			mode = "ipvlan"
-		} else {
-			mode = "direct"
-		}
-
-		args[initArgMode] = mode
-		if option.Config.EnableNodePort &&
-			strings.ToLower(option.Config.Tunnel) != "disabled" {
-			args[initArgMode] = option.Config.Tunnel
-		}
-		args[initArgDevice] = option.Config.Device
 	} else {
-		args[initArgMode] = option.Config.Tunnel
-
-		if option.Config.IsFlannelMasterDeviceSet() {
-			args[initArgMode] = "flannel"
-			args[initArgDevice] = option.Config.FlannelMasterDevice
-		}
+		args[initArgEncryptInterface] = "<nil>"
 	}
 
-	if option.Config.EnableEndpointRoutes == true {
-		args[initArgMode] = "routed"
+	if len(option.Config.Devices) != 0 {
+		for _, device := range option.Config.Devices {
+			_, err := netlink.LinkByName(device)
+			if err != nil {
+				log.WithError(err).WithField("device", device).Warn("Link does not exist")
+				return err
+			}
+		}
+		args[initArgDevices] = strings.Join(option.Config.Devices, ";")
+	} else if option.Config.IsFlannelMasterDeviceSet() {
+		args[initArgDevices] = option.Config.FlannelMasterDevice
+	} else {
+		args[initArgDevices] = "<nil>"
+	}
+
+	switch {
+	case option.Config.IsFlannelMasterDeviceSet():
+		args[initArgMode] = "flannel"
+	case option.Config.Tunnel != option.TunnelDisabled:
+		args[initArgMode] = option.Config.Tunnel
+	case option.Config.DatapathMode == datapathOption.DatapathModeIpvlan:
+		args[initArgMode] = "ipvlan"
+	default:
+		args[initArgMode] = "direct"
 	}
 
 	if option.Config.EnableNodePort {
 		args[initArgNodePort] = "true"
+		if option.Config.EnableIPv4 {
+			addrs := node.GetNodePortIPv4AddrsWithDevices()
+			tmp := make([]string, 0, len(addrs))
+			for iface, ipv4 := range addrs {
+				tmp = append(tmp,
+					fmt.Sprintf("%s=%#x", iface,
+						byteorder.HostSliceToNetwork(ipv4, reflect.Uint32).(uint32)))
+			}
+			args[initArgNodePortIPv4Addrs] = strings.Join(tmp, ";")
+		} else {
+			args[initArgNodePortIPv4Addrs] = "<nil>"
+		}
+		if option.Config.EnableIPv6 {
+			addrs := node.GetNodePortIPv6AddrsWithDevices()
+			tmp := make([]string, 0, len(addrs))
+			for iface, ipv6 := range addrs {
+				tmp = append(tmp, fmt.Sprintf("%s=%s", iface, common.GoArray2CNoSpaces(ipv6)))
+			}
+			args[initArgNodePortIPv6Addrs] = strings.Join(tmp, ";")
+		} else {
+			args[initArgNodePortIPv6Addrs] = "<nil>"
+		}
+	} else {
+		args[initArgNodePort] = "false"
+		args[initArgNodePortIPv4Addrs] = "<nil>"
+		args[initArgNodePortIPv6Addrs] = "<nil>"
 	}
 
-	log.Info("Setting up base BPF datapath")
+	if option.Config.NodePortBindProtection {
+		args[initArgNodePortBind] = "true"
+	} else {
+		args[initArgNodePortBind] = "false"
+	}
+
+	args[initBPFCPU] = GetBPFCPU()
+	args[initArgNrCPUs] = fmt.Sprintf("%d", common.GetNumPossibleCPUs(log))
+
+	if option.Config.EnableEndpointRoutes {
+		args[initArgEndpointRoutes] = "true"
+	} else {
+		args[initArgEndpointRoutes] = "false"
+	}
+
+	clockSource := []string{"ktime", "jiffies"}
+	log.WithFields(logrus.Fields{
+		logfields.BPFInsnSet:     args[initBPFCPU],
+		logfields.BPFClockSource: clockSource[option.Config.ClockSource],
+	}).Info("Setting up BPF datapath")
+
+	if option.Config.IPAM == ipamOption.IPAMENI {
+		var err error
+		if sysSettings, err = addENIRules(sysSettings); err != nil {
+			return fmt.Errorf("unable to install ip rule for ENI multi-node NodePort: %w", err)
+		}
+	}
 
 	for _, s := range sysSettings {
-		log.Infof("Setting sysctl %s=%s", s.name, s.val)
+		log.WithFields(logrus.Fields{
+			logfields.SysParamName:  s.name,
+			logfields.SysParamValue: s.val,
+		}).Info("Setting sysctl")
 		if err := sysctl.Write(s.name, s.val); err != nil {
 			if !s.ignoreErr {
 				return fmt.Errorf("Failed to sysctl -w %s=%s: %s", s.name, s.val, err)
@@ -256,6 +375,12 @@ func (l *Loader) Reinitialize(ctx context.Context, o datapath.BaseProgramOwner, 
 				logfields.SysParamName:  s.name,
 				logfields.SysParamValue: s.val,
 			}).Warning("Failed to sysctl -w")
+		}
+	}
+
+	for i, arg := range args {
+		if arg == "" {
+			log.Warningf("empty argument passed to bpf/init.sh at position %d", i)
 		}
 	}
 
@@ -277,21 +402,21 @@ func (l *Loader) Reinitialize(ctx context.Context, o datapath.BaseProgramOwner, 
 		log.Warning("Cannot check matching of C and Go common struct alignments due to old LLVM/clang version")
 	}
 
-	if !option.Config.IsFlannelMasterDeviceSet() {
-		r.ReserveLocalRoutes()
-	}
-
 	if err := o.Datapath().Node().NodeConfigurationChanged(*o.LocalConfig()); err != nil {
 		return err
 	}
 
 	if option.Config.InstallIptRules {
 		if err := iptMgr.TransientRulesStart(option.Config.HostDevice); err != nil {
-			return err
+			log.WithError(err).Warning("failed to install transient iptables rules")
 		}
 	}
-	// Always remove masquerade rule and then re-add it if required
-	iptMgr.RemoveRules()
+	// The iptables rules are only removed on the first initialization to
+	// remove stale rules or when iptables is enabled. The first invocation
+	// is silent as rules may not exist.
+	if firstInitialization || option.Config.InstallIptRules {
+		iptMgr.RemoveRules(firstInitialization)
+	}
 	if option.Config.InstallIptRules {
 		err := iptMgr.InstallRules(option.Config.HostDevice)
 		iptMgr.TransientRulesEnd(false)

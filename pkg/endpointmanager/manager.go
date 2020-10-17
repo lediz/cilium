@@ -16,20 +16,28 @@ package endpointmanager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
 	"time"
 
+	"github.com/cilium/cilium/pkg/addressing"
 	"github.com/cilium/cilium/pkg/completion"
 	"github.com/cilium/cilium/pkg/endpoint"
 	endpointid "github.com/cilium/cilium/pkg/endpoint/id"
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
+	"github.com/cilium/cilium/pkg/endpointmanager/idallocator"
+	"github.com/cilium/cilium/pkg/identity/cache"
+	"github.com/cilium/cilium/pkg/labels"
+	"github.com/cilium/cilium/pkg/labelsfilter"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/mcastmanager"
 	"github.com/cilium/cilium/pkg/metrics"
 	monitorAPI "github.com/cilium/cilium/pkg/monitor/api"
+	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/prometheus/client_golang/prometheus"
@@ -40,6 +48,7 @@ import (
 var (
 	log         = logging.DefaultLogger.WithField(logfields.LogSubsys, "endpoint-manager")
 	metricsOnce sync.Once
+	launchTime  = 30 * time.Second
 )
 
 // EndpointManager is a structure designed for containing state about the
@@ -53,6 +62,11 @@ type EndpointManager struct {
 	endpoints    map[uint16]*endpoint.Endpoint
 	endpointsAux map[string]*endpoint.Endpoint
 
+	// mcastManager handles IPv6 multicast group join/leave for pods. This is required for the
+	// node to receive ICMPv6 NDP messages, especially NS (Neighbor Solicitation) message, so
+	// pod's IPv6 address is discoverable.
+	mcastManager *mcastmanager.MCastManager
+
 	// EndpointSynchronizer updates external resources (e.g., Kubernetes) with
 	// up-to-date information about endpoints managed by the endpoint manager.
 	EndpointResourceSynchronizer
@@ -61,7 +75,8 @@ type EndpointManager struct {
 // EndpointResourceSynchronizer is an interface which synchronizes CiliumEndpoint
 // resources with Kubernetes.
 type EndpointResourceSynchronizer interface {
-	RunK8sCiliumEndpointSync(ep *endpoint.Endpoint)
+	RunK8sCiliumEndpointSync(ep *endpoint.Endpoint, conf endpoint.EndpointStatusConfiguration)
+	DeleteK8sCiliumEndpointSync(e *endpoint.Endpoint)
 }
 
 // NewEndpointManager creates a new EndpointManager.
@@ -69,6 +84,7 @@ func NewEndpointManager(epSynchronizer EndpointResourceSynchronizer) *EndpointMa
 	mgr := EndpointManager{
 		endpoints:                    make(map[uint16]*endpoint.Endpoint),
 		endpointsAux:                 make(map[string]*endpoint.Endpoint),
+		mcastManager:                 mcastmanager.New(option.Config.IPv6MCastDevice),
 		EndpointResourceSynchronizer: epSynchronizer,
 	}
 
@@ -135,18 +151,29 @@ func (mgr *EndpointManager) InitMetrics() {
 	if option.Config.DryMode {
 		return
 	}
-	metricsOnce.Do(func() { // EndpointCount is a function used to collect this metric. We cannot
-		// increment/decrement a gauge since we invoke Remove gratuitiously and that
+	metricsOnce.Do(func() { // Endpoint is a function used to collect this metric. We cannot
+		// increment/decrement a gauge since we invoke Remove gratuitously and that
 		// would result in negative counts.
 		// It must be thread-safe.
+
+		//TODO(sayboras): Remove deprecated metric in 1.10
 		metrics.EndpointCount = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 			Namespace: metrics.Namespace,
 			Name:      "endpoint_count",
-			Help:      "Number of endpoints managed by this agent",
+			Help:      "Number of endpoints managed by this agent (deprecated, use endpoint instead)",
 		},
 			func() float64 { return float64(len(mgr.GetEndpoints())) },
 		)
 		metrics.MustRegister(metrics.EndpointCount)
+
+		metrics.Endpoint = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Namespace: metrics.Namespace,
+			Name:      "endpoint",
+			Help:      "Number of endpoints managed by this agent",
+		},
+			func() float64 { return float64(len(mgr.GetEndpoints())) },
+		)
+		metrics.MustRegister(metrics.Endpoint)
 	})
 }
 
@@ -156,12 +183,12 @@ func (mgr *EndpointManager) InitMetrics() {
 func (mgr *EndpointManager) AllocateID(currID uint16) (uint16, error) {
 	var newID uint16
 	if currID != 0 {
-		if err := endpointid.Reuse(currID); err != nil {
+		if err := idallocator.Reuse(currID); err != nil {
 			return 0, fmt.Errorf("unable to reuse endpoint ID: %s", err)
 		}
 		newID = currID
 	} else {
-		id := endpointid.Allocate()
+		id := idallocator.Allocate()
 		if id == uint16(0) {
 			return 0, fmt.Errorf("no more endpoint IDs available")
 		}
@@ -278,11 +305,12 @@ func (mgr *EndpointManager) LookupPodName(name string) *endpoint.Endpoint {
 // ReleaseID releases the ID of the specified endpoint from the EndpointManager.
 // Returns an error if the ID cannot be released.
 func (mgr *EndpointManager) ReleaseID(ep *endpoint.Endpoint) error {
-	return endpointid.Release(ep.ID)
+	return idallocator.Release(ep.ID)
 }
 
 // WaitEndpointRemoved waits until all operations associated with Remove of
 // the endpoint have been completed.
+// Note: only used for unit tests
 func (mgr *EndpointManager) WaitEndpointRemoved(ep *endpoint.Endpoint) {
 	<-ep.Unexpose(mgr)
 }
@@ -291,7 +319,7 @@ func (mgr *EndpointManager) WaitEndpointRemoved(ep *endpoint.Endpoint) {
 func (mgr *EndpointManager) RemoveAll() {
 	mgr.mutex.Lock()
 	defer mgr.mutex.Unlock()
-	endpointid.ReallocatePool()
+	idallocator.ReallocatePool()
 	mgr.endpoints = map[uint16]*endpoint.Endpoint{}
 	mgr.endpointsAux = map[string]*endpoint.Endpoint{}
 }
@@ -379,6 +407,16 @@ func (mgr *EndpointManager) RemoveReferences(mappings map[endpointid.PrefixType]
 	}
 }
 
+// AddIPv6Address notifies an addition of an IPv6 address
+func (mgr *EndpointManager) AddIPv6Address(ipv6 addressing.CiliumIPv6) {
+	mgr.mcastManager.AddAddress(ipv6)
+}
+
+// RemoveAIPv6ddress notifies a removal of an IPv6 address
+func (mgr *EndpointManager) RemoveIPv6Address(ipv6 addressing.CiliumIPv6) {
+	mgr.mcastManager.RemoveAddress(ipv6)
+}
+
 // RegenerateAllEndpoints calls a setState for each endpoint and
 // regenerates if state transaction is valid. During this process, the endpoint
 // list is locked and cannot be modified.
@@ -449,12 +487,38 @@ func (mgr *EndpointManager) AddEndpoint(owner regeneration.Owner, ep *endpoint.E
 	if err != nil {
 		return err
 	}
+	owner.SendNotification(monitorAPI.EndpointCreateMessage(ep))
 
-	repr, err := monitorAPI.EndpointCreateRepr(ep)
-	// Ignore endpoint creation if EndpointCreateRepr != nil
-	if err == nil {
-		owner.SendNotification(monitorAPI.AgentNotifyEndpointCreated, repr)
+	return nil
+}
+
+func (mgr *EndpointManager) AddHostEndpoint(ctx context.Context, owner regeneration.Owner,
+	proxy endpoint.EndpointProxy, allocator cache.IdentityAllocator, reason string, nodeName string) error {
+	ep, err := endpoint.CreateHostEndpoint(owner, proxy, allocator)
+	if err != nil {
+		return err
 	}
+
+	if err := mgr.AddEndpoint(owner, ep, reason); err != nil {
+		return err
+	}
+
+	epLabels := labels.Labels{}
+	epLabels.MergeLabels(labels.LabelHost)
+
+	// Initialize with known node labels.
+	newLabels := labels.Map2Labels(node.GetLabels(), labels.LabelSourceK8s)
+	newIdtyLabels, _ := labelsfilter.Filter(newLabels)
+	epLabels.MergeLabels(newIdtyLabels)
+
+	// Give the endpoint a security identity
+	newCtx, cancel := context.WithTimeout(ctx, launchTime)
+	defer cancel()
+	ep.UpdateLabels(newCtx, epLabels, nil, true)
+	if errors.Is(newCtx.Err(), context.DeadlineExceeded) {
+		log.WithError(newCtx.Err()).Warning("Timed out while updating security identify for host endpoint")
+	}
+
 	return nil
 }
 
@@ -491,4 +555,21 @@ func (mgr *EndpointManager) CallbackForEndpointsAtPolicyRev(ctx context.Context,
 // EndpointExists returns whether the endpoint with id exists.
 func (mgr *EndpointManager) EndpointExists(id uint16) bool {
 	return mgr.LookupCiliumID(id) != nil
+}
+
+// GetHostEndpoint returns the host endpoint.
+func (mgr *EndpointManager) GetHostEndpoint() *endpoint.Endpoint {
+	mgr.mutex.RLock()
+	defer mgr.mutex.RUnlock()
+	for _, ep := range mgr.endpoints {
+		if ep.IsHost() {
+			return ep
+		}
+	}
+	return nil
+}
+
+// HostEndpointExists returns true if the host endpoint exists.
+func (mgr *EndpointManager) HostEndpointExists() bool {
+	return mgr.GetHostEndpoint() != nil
 }

@@ -1,4 +1,4 @@
-// Copyright 2018-2019 Authors of Cilium
+// Copyright 2018-2020 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,7 +18,7 @@ import (
 	"fmt"
 )
 
-// DropMin numbers below this are non-drop reason codes
+// DropMin numbers less than this are non-drop reason codes
 var DropMin uint8 = 130
 
 // DropInvalid is the Invalid packet reason.
@@ -29,7 +29,7 @@ var errors = map[uint8]string{
 	2:   "Invalid packet",
 	3:   "Interface",
 	4:   "Interface Decrypted",
-	5:   "LB, sock cgroup: No slave entry found",
+	5:   "LB, sock cgroup: No backend slot entry found",
 	6:   "LB, sock cgroup: No backend entry found",
 	7:   "LB, sock cgroup: Reverse entry update failed",
 	8:   "LB, sock cgroup: Reverse entry stale",
@@ -64,6 +64,7 @@ var errors = map[uint8]string{
 	158: "Service backend not found",
 	160: "No tunnel/encapsulation endpoint (datapath BUG!)",
 	161: "Failed to insert into proxymap", // Unused
+	162: "Reached EDT rate-limiting drop horizon",
 	163: "Unknown connection tracking state",
 	164: "Local host is unreachable",
 	165: "No configuration available to perform policy decision", // Unused
@@ -74,6 +75,15 @@ var errors = map[uint8]string{
 	170: "Encapsulation traffic is prohibited",
 	171: "Invalid identity",
 	172: "Unknown sender",
+	173: "NAT not needed",
+	174: "Is a ClusterIP",
+	175: "First logical datagram fragment not found",
+	176: "Forbidden ICMPv6 message",
+	177: "Denied by LB src range check",
+	178: "Socket lookup failed",
+	179: "Socket assign failed",
+	180: "Proxy redirection not supported for protocol",
+	181: "Policy denied by denylist",
 }
 
 // DropReason prints the drop reason in a human readable string

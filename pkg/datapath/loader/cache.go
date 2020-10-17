@@ -20,7 +20,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/cilium/cilium/common"
+	"github.com/cilium/cilium/pkg/common"
 	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/datapath"
 	"github.com/cilium/cilium/pkg/datapath/loader/metrics"
@@ -30,36 +30,46 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/serializer"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/sirupsen/logrus"
-	"gopkg.in/fsnotify.v1"
 )
 
-var (
-	templateWatcherQueueSize = 10
+const templateWatcherQueueSize = 10
 
-	ignoredELFPrefixes = []string{
-		"2/",                    // Calls within the endpoint
-		"HOST_IP",               // Global
-		"IPV6_NODEPORT",         // Global
-		"ROUTER_IP",             // Global
-		"SNAT_IPV6_EXTERNAL",    // Global
-		"cilium_ct",             // All CT maps, including local
-		"cilium_encrypt_state",  // Global
-		"cilium_events",         // Global
-		"cilium_ipcache",        // Global
-		"cilium_lb",             // Global
-		"cilium_lxc",            // Global
-		"cilium_metrics",        // Global
-		"cilium_nodeport_neigh", // All nodeport neigh maps
-		"cilium_policy",         // Global
-		"cilium_proxy",          // Global
-		"cilium_signals",        // Global
-		"cilium_snat",           // All SNAT maps
-		"cilium_tunnel",         // Global
-		"from-container",        // Prog name
-		"to-container",          // Prog name
-	}
-)
+var ignoredELFPrefixes = []string{
+	"2/",                         // Calls within the endpoint
+	"HOST_IP",                    // Global
+	"IPV6_NODEPORT",              // Global
+	"ROUTER_IP",                  // Global
+	"SNAT_IPV6_EXTERNAL",         // Global
+	"cilium_call_policy",         // Global
+	"cilium_ct",                  // All CT maps, including local
+	"cilium_encrypt_state",       // Global
+	"cilium_events",              // Global
+	"cilium_ipcache",             // Global
+	"cilium_lb",                  // Global
+	"cilium_lxc",                 // Global
+	"cilium_metrics",             // Global
+	"cilium_nodeport_neigh",      // All nodeport neigh maps
+	"cilium_policy",              // All policy maps
+	"cilium_proxy",               // Global
+	"cilium_signals",             // Global
+	"cilium_snat",                // All SNAT maps
+	"cilium_tunnel",              // Global
+	"cilium_ipv4_frag_datagrams", // Global
+	"cilium_ipmasq",              // Global
+	"cilium_throttle",            // Global
+	"from-container",             // Prog name
+	"to-container",               // Prog name
+	"from-netdev",                // Prog name
+	"from-host",                  // Prog name
+	"to-netdev",                  // Prog name
+	"to-host",                    // Prog name
+	// Endpoint IPv6 address. It's possible for the template object to have
+	// these symbols while the endpoint doesn't, if IPv6 was just enabled and
+	// the endpoint restored.
+	"LXC_IP_",
+}
 
 // RestoreTemplates populates the object cache from templates on the filesystem
 // at the specified path.
@@ -185,9 +195,14 @@ func (o *objectCache) delete(hash string) {
 // build attempts to compile and cache a datapath template object file
 // corresponding to the specified endpoint configuration.
 func (o *objectCache) build(ctx context.Context, cfg *templateCfg, hash string) error {
+	isHost := cfg.IsHost()
 	templatePath := filepath.Join(o.workingDirectory, defaults.TemplatesDir, hash)
 	headerPath := filepath.Join(templatePath, common.CHeaderFileName)
-	objectPath := filepath.Join(templatePath, endpointObj)
+	epObj := endpointObj
+	if isHost {
+		epObj = hostEndpointObj
+	}
+	objectPath := filepath.Join(templatePath, epObj)
 
 	if err := os.MkdirAll(templatePath, defaults.StateDirRights); err != nil {
 		return &os.PathError{
@@ -215,7 +230,7 @@ func (o *objectCache) build(ctx context.Context, cfg *templateCfg, hash string) 
 	}
 
 	cfg.stats.BpfCompilation.Start()
-	err = compileTemplate(ctx, templatePath)
+	err = compileTemplate(ctx, templatePath, isHost)
 	cfg.stats.BpfCompilation.End(err == nil)
 	if err != nil {
 		return &os.PathError{
@@ -322,7 +337,7 @@ func (o *objectCache) watchTemplatesDirectory(ctx context.Context) error {
 			if !open {
 				break
 			}
-			if event.Op&fsnotify.Remove != 0 {
+			if event.Op&fsnotify.Remove == fsnotify.Remove {
 				log.WithField(logfields.Path, event.Name).Debug("Detected template removal")
 				templateHash := filepath.Base(filepath.Dir(event.Name))
 				o.delete(templateHash)

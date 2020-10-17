@@ -23,9 +23,11 @@ import (
 	"io/ioutil"
 	"os"
 	"path"
-	"runtime"
+	"sync"
 
 	"github.com/cilium/cilium/pkg/command/exec"
+	"github.com/cilium/cilium/pkg/common"
+	"github.com/cilium/cilium/pkg/datapath/linux/probes"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/option"
 
@@ -39,6 +41,29 @@ const (
 	outputObject   = OutputType("obj")
 	outputAssembly = OutputType("asm")
 	outputSource   = OutputType("c")
+
+	compiler = "clang"
+	linker   = "llc"
+
+	endpointPrefix   = "bpf_lxc"
+	endpointProg     = endpointPrefix + "." + string(outputSource)
+	endpointObj      = endpointPrefix + ".o"
+	endpointObjDebug = endpointPrefix + ".dbg.o"
+	endpointAsm      = endpointPrefix + "." + string(outputAssembly)
+
+	hostEndpointPrefix       = "bpf_host"
+	hostEndpointNetdevPrefix = "bpf_netdev_"
+	hostEndpointProg         = hostEndpointPrefix + "." + string(outputSource)
+	hostEndpointObj          = hostEndpointPrefix + ".o"
+	hostEndpointObjDebug     = hostEndpointPrefix + ".dbg.o"
+	hostEndpointAsm          = hostEndpointPrefix + "." + string(outputAssembly)
+)
+
+var (
+	probeCPUOnce sync.Once
+
+	// default fallback
+	nameBPFCPU = "v1"
 )
 
 // progInfo describes a program to be compiled with the expected output format
@@ -64,18 +89,14 @@ type directoryInfo struct {
 }
 
 var (
-	compiler       = "clang"
-	linker         = "llc"
-	standardCFlags = []string{"-O2", "-target", "bpf",
-		fmt.Sprintf("-D__NR_CPUS__=%d", runtime.NumCPU()),
-		"-Wno-address-of-packed-member", "-Wno-unknown-warning-option"}
-	standardLDFlags = []string{"-march=bpf", "-mcpu=probe"}
-
-	endpointPrefix   = "bpf_lxc"
-	endpointProg     = fmt.Sprintf("%s.%s", endpointPrefix, outputSource)
-	endpointObj      = fmt.Sprintf("%s.o", endpointPrefix)
-	endpointObjDebug = fmt.Sprintf("%s.dbg.o", endpointPrefix)
-	endpointAsm      = fmt.Sprintf("%s.%s", endpointPrefix, outputAssembly)
+	standardCFlags = []string{"-O2", "-target", "bpf", "-std=gnu89",
+		"-nostdinc", fmt.Sprintf("-D__NR_CPUS__=%d", common.GetNumPossibleCPUs(log)),
+		"-Wall", "-Wextra", "-Werror", "-Wshadow",
+		"-Wno-address-of-packed-member",
+		"-Wno-unknown-warning-option",
+		"-Wno-gnu-variable-sized-type-not-at-end",
+		"-Wdeclaration-after-statement"}
+	standardLDFlags = []string{"-march=bpf"}
 
 	// testIncludes allows the unit tests to inject additional include
 	// paths into the compile command at test time. It is usually nil.
@@ -98,12 +119,51 @@ var (
 			OutputType: outputSource,
 		},
 	}
-	datapathProg = &progInfo{
+	debugHostProgs = []*progInfo{
+		{
+			Source:     hostEndpointProg,
+			Output:     hostEndpointObjDebug,
+			OutputType: outputObject,
+		},
+		{
+			Source:     hostEndpointProg,
+			Output:     hostEndpointAsm,
+			OutputType: outputAssembly,
+		},
+		{
+			Source:     hostEndpointProg,
+			Output:     hostEndpointProg,
+			OutputType: outputSource,
+		},
+	}
+	epProg = &progInfo{
 		Source:     endpointProg,
 		Output:     endpointObj,
 		OutputType: outputObject,
 	}
+	hostEpProg = &progInfo{
+		Source:     hostEndpointProg,
+		Output:     hostEndpointObj,
+		OutputType: outputObject,
+	}
 )
+
+// GetBPFCPU returns the BPF CPU for this host.
+func GetBPFCPU() string {
+	probeCPUOnce.Do(func() {
+		if !option.Config.DryMode {
+			// We can probe the availability of BPF instructions indirectly
+			// based on what kernel helpers are available since both were
+			// added in the same release, that is, 4.14.
+			if h := probes.NewProbeManager().GetHelpers("xdp"); h != nil {
+				if _, ok := h["bpf_redirect_map"]; ok {
+					nameBPFCPU = "v2"
+				}
+			}
+		}
+	})
+	return nameBPFCPU
+}
 
 // progLDFlags determines the loader flags for the specified prog and paths.
 func progLDFlags(prog *progInfo, dir *directoryInfo) []string {
@@ -154,6 +214,7 @@ func compileAndLink(ctx context.Context, prog *progInfo, dir *directoryInfo, deb
 		linkArgs = append(linkArgs, "-mattr=dwarfris")
 	}
 	linkArgs = append(linkArgs, standardLDFlags...)
+	linkArgs = append(linkArgs, "-mcpu="+GetBPFCPU())
 	linkArgs = append(linkArgs, progLDFlags(prog, dir)...)
 
 	linkCmd := exec.CommandContext(ctx, linker, linkArgs...)
@@ -192,7 +253,7 @@ func compileAndLink(ctx context.Context, prog *progInfo, dir *directoryInfo, deb
 	return err
 }
 
-// progLDFlags determines the compiler flags for the specified prog and paths.
+// progCFlags determines the compiler flags for the specified prog and paths.
 func progCFlags(prog *progInfo, dir *directoryInfo) []string {
 	var output string
 
@@ -220,9 +281,12 @@ func compile(ctx context.Context, prog *progInfo, dir *directoryInfo, debug bool
 	} else {
 		args = append(args, "-emit-llvm")
 		if debug {
-			args = append(args, "-g")
+			// FIXME: Latest clang/llvm generates incompatible BTF that
+			// iproute2 cannot load.
+			//args = append(args, "-g")
 		}
 	}
+
 	args = append(args, standardCFlags...)
 	args = append(args, progCFlags(prog, dir)...)
 
@@ -256,13 +320,31 @@ func compile(ctx context.Context, prog *progInfo, dir *directoryInfo, debug bool
 // * Preprocessed C
 // * Assembly
 // * Object compiled with debug symbols
-func compileDatapath(ctx context.Context, dirs *directoryInfo, debug bool, logger *logrus.Entry) error {
-	// TODO: Consider logging kernel/clang versions here too
+func compileDatapath(ctx context.Context, dirs *directoryInfo, isHost, debug bool, logger *logrus.Entry) error {
 	scopedLog := logger.WithField(logfields.Debug, debug)
+
+	versionCmd := exec.CommandContext(ctx, compiler, "--version")
+	compilerVersion, err := versionCmd.CombinedOutput(scopedLog, debug)
+	if err != nil {
+		return err
+	}
+	versionCmd = exec.CommandContext(ctx, linker, "--version")
+	linkerVersion, err := versionCmd.CombinedOutput(scopedLog, debug)
+	if err != nil {
+		return err
+	}
+	scopedLog.WithFields(logrus.Fields{
+		compiler: string(compilerVersion),
+		linker:   string(linkerVersion),
+	}).Debug("Compiling datapath")
 
 	// Write out assembly and preprocessing files for debugging purposes
 	if debug {
-		for _, p := range debugProgs {
+		progs := debugProgs
+		if isHost {
+			progs = debugHostProgs
+		}
+		for _, p := range progs {
 			if err := compile(ctx, p, dirs, debug); err != nil {
 				// Only log an error here if the context was not canceled or not
 				// timed out; this log message should only represent failures
@@ -277,12 +359,16 @@ func compileDatapath(ctx context.Context, dirs *directoryInfo, debug bool, logge
 	}
 
 	// Compile the new program
-	if err := compile(ctx, datapathProg, dirs, debug); err != nil {
+	prog := epProg
+	if isHost {
+		prog = hostEpProg
+	}
+	if err := compile(ctx, prog, dirs, debug); err != nil {
 		// Only log an error here if the context was not canceled or not timed
 		// out; this log message should only represent failures with respect to
 		// compiling the program.
 		if ctx.Err() == nil {
-			scopedLog.WithField(logfields.Params, logfields.Repr(datapathProg)).
+			scopedLog.WithField(logfields.Params, logfields.Repr(prog)).
 				WithError(err).Warn("JoinEP: Failed to compile")
 		}
 		return err
@@ -309,12 +395,12 @@ func Compile(ctx context.Context, src string, out string) error {
 }
 
 // compileTemplate compiles a BPF program generating a template object file.
-func compileTemplate(ctx context.Context, out string) error {
+func compileTemplate(ctx context.Context, out string, isHost bool) error {
 	dirs := directoryInfo{
 		Library: option.Config.BpfDir,
 		Runtime: option.Config.StateDir,
 		Output:  out,
 		State:   out,
 	}
-	return compileDatapath(ctx, &dirs, option.Config.BPFCompilationDebug, log)
+	return compileDatapath(ctx, &dirs, isHost, option.Config.BPFCompilationDebug, log)
 }

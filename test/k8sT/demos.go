@@ -25,40 +25,31 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-var (
-	starWarsDemoLinkRoot = "https://raw.githubusercontent.com/cilium/star-wars-demo/v1.0.1"
-)
-
-func getStarWarsResourceLink(file string) string {
-	// Cannot use filepath.Join because it removes one of the '/' from
-	// https:// and results in a malformed URL.
-	return fmt.Sprintf("%s/%s", starWarsDemoLinkRoot, file)
-}
-
 var _ = Describe("K8sDemosTest", func() {
 
 	var (
 		kubectl        *helpers.Kubectl
 		ciliumFilename string
 
-		backgroundCancel context.CancelFunc = func() { return }
+		backgroundCancel context.CancelFunc = func() {}
 		backgroundError  error
 
-		deathStarYAMLLink = getStarWarsResourceLink("01-deathstar.yaml")
-		xwingYAMLLink     = getStarWarsResourceLink("02-xwing.yaml")
-		l7PolicyYAMLLink  = getStarWarsResourceLink("policy/l7_policy.yaml")
+		deathStarYAMLLink, xwingYAMLLink, l7PolicyYAMLLink string
 	)
 
 	BeforeAll(func() {
 		kubectl = helpers.CreateKubectl(helpers.K8s1VMName(), logger)
+		starWarsDemoDir := helpers.ManifestGet(kubectl.BasePath(), "star-wars-demo")
+		deathStarYAMLLink = filepath.Join(starWarsDemoDir, "01-deathstar.yaml")
+		xwingYAMLLink = filepath.Join(starWarsDemoDir, "02-xwing.yaml")
+		l7PolicyYAMLLink = filepath.Join(starWarsDemoDir, "policy/l7_policy.yaml")
+
 		ciliumFilename = helpers.TimestampFilename("cilium.yaml")
 		DeployCiliumAndDNS(kubectl, ciliumFilename)
 	})
 
 	AfterFailed(func() {
-		kubectl.CiliumReport(helpers.CiliumNamespace,
-			"cilium endpoint list",
-			"cilium service list")
+		kubectl.CiliumReport("cilium endpoint list", "cilium service list")
 	})
 
 	JustBeforeEach(func() {
@@ -82,8 +73,7 @@ var _ = Describe("K8sDemosTest", func() {
 	})
 
 	AfterAll(func() {
-		kubectl.DeleteCiliumDS()
-		ExpectAllPodsTerminated(kubectl)
+		UninstallCiliumFromManifest(kubectl, ciliumFilename)
 		kubectl.CloseSSHClient()
 	})
 
@@ -126,7 +116,7 @@ var _ = Describe("K8sDemosTest", func() {
 
 		res = kubectl.ExecPodCmd(helpers.DefaultNamespace, xwingPod,
 			helpers.CurlFail("http://%s/v1", deathstarFQDN))
-		res.ExpectSuccess("unable to curl %s/v1: %s", deathstarFQDN, res.Output())
+		res.ExpectSuccess("unable to curl %s/v1: %s", deathstarFQDN, res.Stdout())
 
 		By("Importing L7 Policy which restricts access to %q", exhaustPortPath)
 		_, err = kubectl.CiliumPolicyAction(
@@ -140,12 +130,12 @@ var _ = Describe("K8sDemosTest", func() {
 		By("Showing how alliance cannot access %q without force header in API request after importing L7 Policy", exhaustPortPath)
 		res = kubectl.ExecPodCmd(helpers.DefaultNamespace, xwingPod,
 			helpers.CurlWithHTTPCode("-X PUT http://%s", exhaustPortPath))
-		res.ExpectContains("403", "able to access %s when policy disallows it; %s", exhaustPortPath, res.Output())
+		res.ExpectContains("403", "able to access %s when policy disallows it; %s", exhaustPortPath, res.Stdout())
 
 		By("Showing how alliance can access %q with force header in API request to attack the deathstar", exhaustPortPath)
 		res = kubectl.ExecPodCmd(helpers.DefaultNamespace, xwingPod,
 			helpers.CurlWithHTTPCode("-X PUT -H 'X-Has-Force: True' http://%s", exhaustPortPath))
 		By("Expecting 503 to be returned when using force header to attack the deathstar")
-		res.ExpectContains("503", "unable to access %s when policy allows it; %s", exhaustPortPath, res.Output())
+		res.ExpectContains("503", "unable to access %s when policy allows it; %s", exhaustPortPath, res.Stdout())
 	})
 })

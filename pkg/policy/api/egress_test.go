@@ -1,4 +1,4 @@
-// Copyright 2018-2019 Authors of Cilium
+// Copyright 2018-2020 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,9 +22,9 @@ import (
 	"net"
 
 	"github.com/cilium/cilium/pkg/checker"
+	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
 
 	. "gopkg.in/check.v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func (s *PolicyAPITestSuite) TestRequiresDerivativeRuleWithoutToGroups(c *C) {
@@ -42,11 +42,13 @@ func (s *PolicyAPITestSuite) TestRequiresDerivativeRuleWithToGroups(c *C) {
 
 func (s *PolicyAPITestSuite) TestCreateDerivativeRuleWithoutToGroups(c *C) {
 	eg := &EgressRule{
-		ToEndpoints: []EndpointSelector{
-			{
-				LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
-					"test": "true",
-				},
+		EgressCommonRule: EgressCommonRule{
+			ToEndpoints: []EndpointSelector{
+				{
+					LabelSelector: &slim_metav1.LabelSelector{MatchLabels: map[string]string{
+						"test": "true",
+					},
+					},
 				},
 			},
 		},
@@ -63,8 +65,10 @@ func (s *PolicyAPITestSuite) TestCreateDerivativeRuleWithToGroupsWitInvalidRegis
 	RegisterToGroupsProvider(AWSProvider, cb)
 
 	eg := &EgressRule{
-		ToGroups: []ToGroups{
-			GetToGroupsRule(),
+		EgressCommonRule: EgressCommonRule{
+			ToGroups: []ToGroups{
+				GetToGroupsRule(),
+			},
 		},
 	}
 	_, err := eg.CreateDerivative(context.TODO())
@@ -76,8 +80,10 @@ func (s *PolicyAPITestSuite) TestCreateDerivativeRuleWithToGroupsAndToPorts(c *C
 	RegisterToGroupsProvider(AWSProvider, cb)
 
 	eg := &EgressRule{
-		ToGroups: []ToGroups{
-			GetToGroupsRule(),
+		EgressCommonRule: EgressCommonRule{
+			ToGroups: []ToGroups{
+				GetToGroupsRule(),
+			},
 		},
 	}
 
@@ -97,8 +103,10 @@ func (s *PolicyAPITestSuite) TestCreateDerivativeWithoutErrorAndNoIPs(c *C) {
 	RegisterToGroupsProvider(AWSProvider, cb)
 
 	eg := &EgressRule{
-		ToGroups: []ToGroups{
-			GetToGroupsRule(),
+		EgressCommonRule: EgressCommonRule{
+			ToGroups: []ToGroups{
+				GetToGroupsRule(),
+			},
 		},
 	}
 
@@ -128,11 +136,13 @@ func (s *PolicyAPITestSuite) TestIsLabelBasedEgress(c *C) {
 			setupArgs: func() args {
 				return args{
 					eg: &EgressRule{
-						ToEndpoints: []EndpointSelector{
-							{
-								LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
-									"test": "true",
-								},
+						EgressCommonRule: EgressCommonRule{
+							ToEndpoints: []EndpointSelector{
+								{
+									LabelSelector: &slim_metav1.LabelSelector{MatchLabels: map[string]string{
+										"test": "true",
+									},
+									},
 								},
 							},
 						},
@@ -150,7 +160,9 @@ func (s *PolicyAPITestSuite) TestIsLabelBasedEgress(c *C) {
 			setupArgs: func() args {
 				return args{
 					&EgressRule{
-						ToCIDR: CIDRSlice{"192.0.0.0/3"},
+						EgressCommonRule: EgressCommonRule{
+							ToCIDR: CIDRSlice{"192.0.0.0/3"},
+						},
 					},
 				}
 			},
@@ -165,9 +177,11 @@ func (s *PolicyAPITestSuite) TestIsLabelBasedEgress(c *C) {
 			setupArgs: func() args {
 				return args{
 					&EgressRule{
-						ToCIDRSet: CIDRRuleSlice{
-							{
-								Cidr: "192.0.0.0/3",
+						EgressCommonRule: EgressCommonRule{
+							ToCIDRSet: CIDRRuleSlice{
+								{
+									Cidr: "192.0.0.0/3",
+								},
 							},
 						},
 					},
@@ -184,11 +198,13 @@ func (s *PolicyAPITestSuite) TestIsLabelBasedEgress(c *C) {
 			setupArgs: func() args {
 				return args{
 					&EgressRule{
-						ToRequires: []EndpointSelector{
-							{
-								LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
-									"test": "true",
-								},
+						EgressCommonRule: EgressCommonRule{
+							ToRequires: []EndpointSelector{
+								{
+									LabelSelector: &slim_metav1.LabelSelector{MatchLabels: map[string]string{
+										"test": "true",
+									},
+									},
 								},
 							},
 						},
@@ -211,11 +227,13 @@ func (s *PolicyAPITestSuite) TestIsLabelBasedEgress(c *C) {
 				selector := ServiceSelector(NewESFromMatchRequirements(svcLabels, nil))
 				return args{
 					&EgressRule{
-						ToServices: []Service{
-							{
-								K8sServiceSelector: &K8sServiceSelectorNamespace{
-									Selector:  selector,
-									Namespace: "",
+						EgressCommonRule: EgressCommonRule{
+							ToServices: []Service{
+								{
+									K8sServiceSelector: &K8sServiceSelectorNamespace{
+										Selector:  selector,
+										Namespace: "",
+									},
 								},
 							},
 						},
@@ -252,8 +270,10 @@ func (s *PolicyAPITestSuite) TestIsLabelBasedEgress(c *C) {
 			setupArgs: func() args {
 				return args{
 					&EgressRule{
-						ToEntities: EntitySlice{
-							EntityHost,
+						EgressCommonRule: EgressCommonRule{
+							ToEntities: EntitySlice{
+								EntityHost,
+							},
 						},
 					},
 				}

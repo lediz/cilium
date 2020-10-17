@@ -18,6 +18,9 @@ type CreateRouteTableInput struct {
 	// it is UnauthorizedOperation.
 	DryRun *bool `locationName:"dryRun" type:"boolean"`
 
+	// The tags to assign to the route table.
+	TagSpecifications []TagSpecification `locationName:"TagSpecification" locationNameList:"item" type:"list"`
+
 	// The ID of the VPC.
 	//
 	// VpcId is a required field
@@ -86,6 +89,7 @@ func (c *Client) CreateRouteTableRequest(input *CreateRouteTableInput) CreateRou
 	}
 
 	req := c.newRequest(op, input, &CreateRouteTableOutput{})
+
 	return CreateRouteTableRequest{Request: req, Input: input, Copy: c.CreateRouteTableRequest}
 }
 

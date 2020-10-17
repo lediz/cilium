@@ -50,9 +50,11 @@ var _ = Describe("NightlyEpsMeasurement", func() {
 	BeforeAll(func() {
 		kubectl = helpers.CreateKubectl(helpers.K8s1VMName(), logger)
 		vagrantManifestPath = path.Join(kubectl.BasePath(), manifestPath)
+
 		ciliumFilename = helpers.TimestampFilename("cilium.yaml")
 		DeployCiliumAndDNS(kubectl, ciliumFilename)
 	})
+
 	deleteAll := func() {
 		ctx, cancel := context.WithTimeout(context.Background(), endpointsTimeout)
 		defer cancel()
@@ -65,17 +67,18 @@ var _ = Describe("NightlyEpsMeasurement", func() {
 			logger.Errorf("DeleteAll: delete all pods,services failed after %s", helpers.HelperTimeout)
 		}
 	}
+
 	AfterAll(func() {
 		deleteAll()
 		kubectl.DeleteCiliumDS()
 		ExpectAllPodsTerminated(kubectl)
+
+		UninstallCiliumFromManifest(kubectl, ciliumFilename)
 		kubectl.CloseSSHClient()
 	})
 
 	AfterFailed(func() {
-		kubectl.CiliumReport(helpers.CiliumNamespace,
-			"cilium service list",
-			"cilium endpoint list")
+		kubectl.CiliumReport("cilium service list", "cilium endpoint list")
 	})
 
 	JustAfterEach(func() {
@@ -104,7 +107,7 @@ var _ = Describe("NightlyEpsMeasurement", func() {
 	getServices := func() map[string]string {
 		// getServices returns a map of services, where service name is the key
 		// and the ClusterIP is the value.
-		services, err := kubectl.Get(helpers.DefaultNamespace, fmt.Sprintf("services -l zgroup=testapp")).Filter(
+		services, err := kubectl.Get(helpers.DefaultNamespace, "services -l zgroup=testapp").Filter(
 			`{range .items[*]}{.metadata.name}{"="}{.spec.clusterIP}{"\n"}{end}`)
 		ExpectWithOffset(1, err).To(BeNil(), "cannot retrieve testapp services")
 		result := make(map[string]string)
@@ -129,7 +132,7 @@ var _ = Describe("NightlyEpsMeasurement", func() {
 
 		log.WithFields(logrus.Fields{"pod creation time": waitForPodsTime}).Info("")
 
-		ciliumPods, err := kubectl.GetCiliumPods(helpers.CiliumNamespace)
+		ciliumPods, err := kubectl.GetCiliumPods()
 		Expect(err).To(BeNil(), "Cannot retrieve cilium pods")
 
 		runtime := b.Time("Endpoint creation", func() {
@@ -238,7 +241,7 @@ var _ = Describe("NightlyEpsMeasurement", func() {
 
 		getClient := func(ip, port, filePipe string) string {
 			return fmt.Sprintf(
-				"rm %[1]s; touch %[1]s; tail -f %[1]s 2>&1 | nc -v %[2]s %[3]s",
+				`bash -c "rm %[1]s; touch %[1]s; tail -f %[1]s 2>&1 | nc -v %[2]s %[3]s"`,
 				filePipe, ip, port)
 		}
 
@@ -253,7 +256,7 @@ var _ = Describe("NightlyEpsMeasurement", func() {
 		}
 		// testConnectivity check that nc is running across the k8s nodes
 		testConnectivity := func() {
-
+			killNetcat := "killall nc"
 			pipePath := "/tmp/nc_pipe.txt"
 			listeningString := "listening on [::]:8888"
 
@@ -262,7 +265,7 @@ var _ = Describe("NightlyEpsMeasurement", func() {
 
 			netcatPods, err := kubectl.GetPodNames(helpers.DefaultNamespace, "zgroup=netcatds")
 			Expect(err).To(BeNil(), "Cannot get pods names for netcatds")
-			Expect(len(netcatPods)).To(BeNumerically(">", 0), "Pods are not ready")
+			Expect(len(netcatPods)).To(BeNumerically(">=", 2), "Pods are not ready")
 
 			server := netcatPods[0]
 			client := netcatPods[1]
@@ -270,22 +273,29 @@ var _ = Describe("NightlyEpsMeasurement", func() {
 			Expect(err).To(BeNil(), "Cannot get netcat ips")
 
 			ncServer := getServer("8888")
-			ncClient := getClient(ips[server], "8888", pipePath)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
-			serverctx := kubectl.ExecPodCmdBackground(ctx, helpers.DefaultNamespace, server, ncServer)
-			err = serverctx.WaitUntilMatch(listeningString)
-			Expect(err).To(BeNil(), "netcat server did not start correctly")
-
-			_ = kubectl.ExecPodCmdBackground(ctx, helpers.DefaultNamespace, client, ncClient)
-
 			testNcConnectivity := func(sleep time.Duration) {
-				helpers.Sleep(sleep)
 				uid := helpers.MakeUID()
-				_ = kubectl.ExecPodCmd(helpers.DefaultNamespace, client,
-					fmt.Sprintf(`echo -e "%s" >> %s`, HTTPRequest(uid, ips[client]), pipePath))
+				pipePath = "/tmp/" + uid
+				ncClient := getClient(ips[server], "8888", pipePath)
+
+				kubectl.ExecPodCmd(helpers.DefaultNamespace, server, killNetcat)
+				serverctx := kubectl.ExecPodCmdBackground(ctx, helpers.DefaultNamespace, server, ncServer)
+				err = serverctx.WaitUntilMatch(listeningString)
+				Expect(err).To(BeNil(), "netcat server did not start correctly")
+
+				kubectl.ExecPodCmd(helpers.DefaultNamespace, client, killNetcat)
+				kubectl.ExecPodCmdBackground(ctx, helpers.DefaultNamespace, client, ncClient)
+
+				helpers.Sleep(sleep)
+
+				res := kubectl.ExecPodCmd(helpers.DefaultNamespace, client,
+					fmt.Sprintf(`bash -c "echo -e '%[1]s' >> %s"`, HTTPRequest(uid, ips[client]), pipePath))
+				res.ExpectSuccess("Failed to populate netcat client pipe")
+
 				Expect(serverctx.WaitUntilMatch(uid)).To(BeNil(),
 					"%q is not in the server output after timeout", uid)
 				serverctx.ExpectContains(uid, "Cannot get server UUID")
@@ -320,10 +330,8 @@ var _ = Describe("NightlyEpsMeasurement", func() {
 })
 
 var _ = Describe("NightlyExamples", func() {
-
 	var kubectl *helpers.Kubectl
-	var demoPath string
-	var l3Policy, l7Policy string
+	var l3Policy string
 	var ciliumFilename string
 
 	BeforeAll(func() {
@@ -332,13 +340,14 @@ var _ = Describe("NightlyExamples", func() {
 		demoPath = helpers.ManifestGet(kubectl.BasePath(), "demo.yaml")
 		l3Policy = helpers.ManifestGet(kubectl.BasePath(), "l3-l4-policy.yaml")
 		l7Policy = helpers.ManifestGet(kubectl.BasePath(), "l7-policy.yaml")
+
 		ciliumFilename = helpers.TimestampFilename("cilium.yaml")
+		DeployCiliumAndDNS(kubectl, ciliumFilename)
+
 	})
 
 	AfterFailed(func() {
-		kubectl.CiliumReport(helpers.CiliumNamespace,
-			"cilium service list",
-			"cilium endpoint list")
+		kubectl.CiliumReport("cilium service list", "cilium endpoint list")
 	})
 
 	JustAfterEach(func() {
@@ -354,49 +363,76 @@ var _ = Describe("NightlyExamples", func() {
 	})
 
 	AfterAll(func() {
+		UninstallCiliumFromManifest(kubectl, ciliumFilename)
 		kubectl.CloseSSHClient()
 	})
 
 	Context("Upgrade test", func() {
-		var cleanupCallback = func() { return }
+		var (
+			kubectl *helpers.Kubectl
 
-		BeforeEach(func() {
+			cleanupCallback = func() {}
+		)
+
+		BeforeAll(func() {
+			kubectl = helpers.CreateKubectl(helpers.K8s1VMName(), logger)
+
+			demoPath = helpers.ManifestGet(kubectl.BasePath(), "demo.yaml")
+			l7Policy = helpers.ManifestGet(kubectl.BasePath(), "l7-policy.yaml")
+			migrateSVCClient = helpers.ManifestGet(kubectl.BasePath(), "migrate-svc-client.yaml")
+			migrateSVCServer = helpers.ManifestGet(kubectl.BasePath(), "migrate-svc-server.yaml")
+
+			kubectl.Delete(migrateSVCClient)
+			kubectl.Delete(migrateSVCServer)
+			kubectl.Delete(l7Policy)
+			kubectl.Delete(demoPath)
+
 			// Delete kube-dns because if not will be a restore the old endpoints
 			// from master instead of create the new ones.
-			_ = kubectl.Delete(helpers.DNSDeployment(kubectl.BasePath()))
+			_ = kubectl.DeleteResource(
+				"deploy", fmt.Sprintf("-n %s kube-dns", helpers.KubeSystemNamespace))
 
 			_ = kubectl.DeleteResource(
 				"deploy", fmt.Sprintf("-n %s cilium-operator", helpers.CiliumNamespace))
+			// Sometimes PolicyGen has a lot of pods running around without delete
+			// it. Using this we are sure that we delete before this test start
+			kubectl.Exec(fmt.Sprintf(
+				"%s delete --all pods,svc,cnp -n %s", helpers.KubectlCmd, helpers.DefaultNamespace))
 
-			// Delete etcd operator because sometimes when install from
-			// clean-state the quorum is lost.
-			// ETCD operator maybe is not installed at all, so no assert here.
-			kubectl.DeleteETCDOperator()
 			ExpectAllPodsTerminated(kubectl)
+		})
 
+		AfterAll(func() {
+			kubectl.CloseSSHClient()
+		})
+
+		AfterFailed(func() {
+			kubectl.CiliumReport("cilium endpoint list")
+		})
+
+		JustAfterEach(func() {
+			kubectl.ValidateNoErrorsInLogs(CurrentGinkgoTestDescription().Duration)
 		})
 
 		AfterEach(func() {
 			cleanupCallback()
-		})
-
-		AfterAll(func() {
-			_ = kubectl.ApplyDefault(helpers.DNSDeployment(kubectl.BasePath()))
+			ExpectAllPodsTerminated(kubectl)
 		})
 
 		for imageVersion, chartVersion := range helpers.NightlyStableUpgradesFrom {
 			func(imageVersion, chartVersion string) {
-				It(fmt.Sprintf("Update Cilium from %s to master", imageVersion), func() {
-					var assertUpgradeSuccessful func()
-					assertUpgradeSuccessful, cleanupCallback = InstallAndValidateCiliumUpgrades(
-						kubectl,
-						imageVersion,
-						chartVersion,
-						helpers.CiliumLatestHelmChartVersion,
-						helpers.CiliumLatestImageVersion,
-					)
-					assertUpgradeSuccessful()
-				})
+				SkipItIf(func() bool { return !helpers.RunsWithKubeProxy() },
+					fmt.Sprintf("Update Cilium from %s to master", imageVersion), func() {
+						var assertUpgradeSuccessful func()
+						assertUpgradeSuccessful, cleanupCallback = InstallAndValidateCiliumUpgrades(
+							kubectl,
+							chartVersion,
+							imageVersion,
+							helpers.CiliumLatestHelmChartVersion,
+							helpers.GetLatestImageVersion(),
+						)
+						assertUpgradeSuccessful()
+					})
 			}(imageVersion, chartVersion)
 		}
 	})
@@ -415,7 +451,6 @@ var _ = Describe("NightlyExamples", func() {
 			AppManifest = kubectl.GetFilePath(GRPCManifest)
 			PolicyManifest = kubectl.GetFilePath(GRPCPolicy)
 
-			ciliumFilename = helpers.TimestampFilename("cilium.yaml")
 			DeployCiliumAndDNS(kubectl, ciliumFilename)
 		})
 

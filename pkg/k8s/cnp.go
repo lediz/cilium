@@ -22,6 +22,8 @@ import (
 	"path"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"github.com/cilium/cilium/pkg/backoff"
 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	clientset "github.com/cilium/cilium/pkg/k8s/client/clientset/versioned"
@@ -31,7 +33,7 @@ import (
 	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/metrics"
-	"github.com/cilium/cilium/pkg/node"
+	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/spanstat"
 
@@ -348,10 +350,8 @@ func (c *CNPStatusUpdateContext) updateViaKVStore(ctx context.Context, cnp *type
 		annotations map[string]string
 	)
 
-	select {
-	case <-kvstore.Client().Connected(ctx):
-	case <-ctx.Done():
-		return ctx.Err()
+	if err := <-kvstore.Client().Connected(ctx); err != nil {
+		return fmt.Errorf("kvstore is unavailable: %w", err)
 	}
 
 	capabilities := k8sversion.Capabilities()
@@ -391,7 +391,7 @@ func (c *CNPStatusUpdateContext) updateViaKVStore(ctx context.Context, cnp *type
 		Namespace:                     cnp.GetNamespace(),
 		UID:                           cnp.GetUID(),
 		CiliumNetworkPolicyNodeStatus: cnpns,
-		Node:                          node.GetName(),
+		Node:                          nodeTypes.GetName(),
 	}
 	marshaledVal, err := json.Marshal(cnpWithMeta)
 	if err != nil {
@@ -401,7 +401,7 @@ func (c *CNPStatusUpdateContext) updateViaKVStore(ctx context.Context, cnp *type
 	// If the namespace is empty it means that the policy is clusterwide policy.
 	// This is then taken care of internally when we try to join the path using
 	// golangs `path.Join`
-	key := formatKeyNodeForKvstore(cnp.GetObjectMeta(), node.GetName())
+	key := formatKeyNodeForKvstore(cnp.GetObjectMeta(), nodeTypes.GetName())
 	log.WithFields(logrus.Fields{
 		"key":   key,
 		"value": marshaledVal,
@@ -502,9 +502,23 @@ func updateStatusesByCapabilities(client clientset.Interface, capabilities k8sve
 		// in that case we need to update the status of ClusterwidePolicies resource and not
 		// CiliumNetworkPolicy
 		if ns == "" {
-			_, err = client.CiliumV2().CiliumClusterwideNetworkPolicies().Patch(name, k8sTypes.JSONPatchType, createStatusAndNodePatchJSON, "status")
+			_, err = client.CiliumV2().CiliumClusterwideNetworkPolicies().Patch(
+				context.TODO(),
+				name,
+				k8sTypes.JSONPatchType,
+				createStatusAndNodePatchJSON,
+				metav1.PatchOptions{},
+				"status",
+			)
 		} else {
-			_, err = client.CiliumV2().CiliumNetworkPolicies(ns).Patch(name, k8sTypes.JSONPatchType, createStatusAndNodePatchJSON, "status")
+			_, err = client.CiliumV2().CiliumNetworkPolicies(ns).Patch(
+				context.TODO(),
+				name,
+				k8sTypes.JSONPatchType,
+				createStatusAndNodePatchJSON,
+				metav1.PatchOptions{},
+				"status",
+			)
 		}
 
 		if err != nil {
@@ -548,9 +562,23 @@ func updateStatusesByCapabilities(client clientset.Interface, capabilities k8sve
 
 				// Again for clusterwide policy we need to handle the update appropriately.
 				if ns == "" {
-					_, err = client.CiliumV2().CiliumClusterwideNetworkPolicies().Patch(name, k8sTypes.JSONPatchType, createStatusAndNodePatchJSON, "status")
+					_, err = client.CiliumV2().CiliumClusterwideNetworkPolicies().Patch(
+						context.TODO(),
+						name,
+						k8sTypes.JSONPatchType,
+						createStatusAndNodePatchJSON,
+						metav1.PatchOptions{},
+						"status",
+					)
 				} else {
-					_, err = client.CiliumV2().CiliumNetworkPolicies(ns).Patch(name, k8sTypes.JSONPatchType, createStatusAndNodePatchJSON, "status")
+					_, err = client.CiliumV2().CiliumNetworkPolicies(ns).Patch(
+						context.TODO(),
+						name,
+						k8sTypes.JSONPatchType,
+						createStatusAndNodePatchJSON,
+						metav1.PatchOptions{},
+						"status",
+					)
 				}
 
 				if err != nil {
@@ -564,44 +592,30 @@ func updateStatusesByCapabilities(client clientset.Interface, capabilities k8sve
 				}
 			}
 		}
-	case capabilities.UpdateStatus:
-		if cnp == nil {
-			return fmt.Errorf("cannot update status of nil CNP")
-		}
-		// k8s < 1.13 has minimal support for JSON patch where kube-apiserver
-		// can print Error messages and even panic in k8s < 1.10.
-		for nodeName, cnpns := range nodeStatuses {
-			cnp.SetPolicyStatus(nodeName, cnpns)
-		}
-
-		if ns == "" {
-			ccnp := &cilium_v2.CiliumClusterwideNetworkPolicy{
-				CiliumNetworkPolicy: cnp.CiliumNetworkPolicy,
-				Status:              cnp.CiliumNetworkPolicy.Status,
-			}
-			_, err = client.CiliumV2().CiliumClusterwideNetworkPolicies().UpdateStatus(ccnp)
-		} else {
-			_, err = client.CiliumV2().CiliumNetworkPolicies(ns).UpdateStatus(cnp.CiliumNetworkPolicy)
-		}
 
 	default:
 		if cnp == nil {
 			return fmt.Errorf("cannot update status of nil CNP")
 		}
-		// k8s < 1.13 has minimal support for JSON patch where kube-apiserver
-		// can print Error messages and even panic in k8s < 1.10.
+		// K8s < 1.13 has minimal support for JSON patch where kube-apiserver
+		// can print Error messages and even panic in K8s < 1.10.
 		for nodeName, cnpns := range nodeStatuses {
 			cnp.SetPolicyStatus(nodeName, cnpns)
 		}
 
 		if ns == "" {
 			ccnp := &cilium_v2.CiliumClusterwideNetworkPolicy{
+				// Need to explicitly copy all the fields even though CNP is
+				// embedded inside CCNP. See comment inside CCNP type
+				// definition. This is required for K8s versions < 1.13.
+				TypeMeta:            cnp.TypeMeta,
+				ObjectMeta:          cnp.ObjectMeta,
 				CiliumNetworkPolicy: cnp.CiliumNetworkPolicy,
 				Status:              cnp.CiliumNetworkPolicy.Status,
 			}
-			_, err = client.CiliumV2().CiliumClusterwideNetworkPolicies().Update(ccnp)
+			_, err = client.CiliumV2().CiliumClusterwideNetworkPolicies().UpdateStatus(context.TODO(), ccnp, metav1.UpdateOptions{})
 		} else {
-			_, err = client.CiliumV2().CiliumNetworkPolicies(ns).Update(cnp.CiliumNetworkPolicy)
+			_, err = client.CiliumV2().CiliumNetworkPolicies(ns).UpdateStatus(context.TODO(), cnp.CiliumNetworkPolicy, metav1.UpdateOptions{})
 		}
 	}
 	if err != nil {

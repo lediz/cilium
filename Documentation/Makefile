@@ -1,104 +1,78 @@
-# Minimal makefile for Sphinx documentation
-#
+# Copyright 2017-2020 Authors of Cilium
+# SPDX-License-Identifier: Apache-2.0
+
+include ../Makefile.defs
 include ../Makefile.quiet
 
-# You can set these variables from the command line.
-SPHINXOPTS    =
-SPHINXBUILD   = sphinx-build
-SPHINXPROJ    = Cilium
-IGNOREDWARNINGS := -e "tabs assets" -e "misspelled words" -e "RemovedInSphinx20Warning"
-SOURCEDIR     = .
-BUILDDIR      = _build
-CMDREFDIR     = cmdref
-CILIUMDIR     = ../cilium
-AGENTDIR      = ../daemon
-BUGTOOLDIR    = ../bugtool
-HEALTHDIR     = ../cilium-health
-OPERATORDIR   = ../operator
-SPELLING_LIST = spelling_wordlist.txt
+.PHONY: default clean builder-image cmdref epub latex html run-server stop-server
 
-# Put it first so that "make" without argument is like "make help".
-help:
-	@$(SPHINXBUILD) -M help "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
+default: html
 
-CONTRIB_DOCS_PATH = Documentation/contributing/development/dev_setup.rst
-REQUIRED_GO_VERSION = $(shell cat ../GO_VERSION)
-
-check-go-version:
-	@if ! grep "go <https://golang.org/dl/>.*$(REQUIRED_GO_VERSION)" ../$(CONTRIB_DOCS_PATH) > /dev/null; then \
-		echo "Contributing documentation has invalid Go version."; \
-		echo "Please set the following version in $(CONTRIB_DOCS_PATH):"; \
-		echo "$(REQUIRED_GO_VERSION)"; \
-		exit 1; \
-	fi
-
-PIP_REQUIREMENTS = $(shell cat requirements.txt | sed -e 's/==.*//g' -e 's/\n/ /g')
-
-check-requirements:
-	@set -e;								\
-	$(ECHO_CHECK) documentation dependencies...;				\
-	PYPKGS=$$(pip3 freeze);							\
-	for pkg in ${PIP_REQUIREMENTS}; do					\
-		echo $${PYPKGS} | grep -q $${pkg}				\
-		|| (echo "Documentation dependency '$${pkg}' not found.";	\
-		    echo "Run 'pip3 install --user -r Documentation/requirements.txt'";	\
-		    exit 2);							\
-	done
-
-cmdref:
-	$(QUIET) # We don't know what changed so recreate the directory
-	$(QUIET) -rm -rvf $(CMDREFDIR)/cilium*
-	@$(ECHO_GEN)cmdref/cilium
-	$(QUIET) ${CILIUMDIR}/cilium cmdref -d $(CMDREFDIR)
-	@$(ECHO_GEN)cmdref/cilium-bugtool
-	$(QUIET) ${BUGTOOLDIR}/cilium-bugtool cmdref -d $(CMDREFDIR)
-	@$(ECHO_GEN)cmdref/cilium-agent
-	$(QUIET) ${AGENTDIR}/cilium-agent --cmdref $(CMDREFDIR)
-	@$(ECHO_GEN)cmdref/cilium-health
-	$(QUIET) ${HEALTHDIR}/cilium-health --cmdref $(CMDREFDIR)
-	@$(ECHO_GEN)cmdref/cilium-operator
-	$(QUIET) ${OPERATORDIR}/cilium-operator --cmdref $(CMDREFDIR)
-
-# Touch "$@.ok" if the docs build succeeds. Fail if there are errors
-# or output other than those including the following phrases:
-# "tabs assets" - These are always printed by the spelling check.
-# "misspelled words" - These will be explicitly checked below.
-# Finally, fail out if we can't remove the file that marks success.
-check-build: check-requirements
-	@$(ECHO_CHECK) documentation build...
-	@mkdir -p $(BUILDDIR)
-	$(QUIET)($(SPHINXBUILD) -b spelling -d "$(BUILDDIR)/doctrees" "$(SOURCEDIR)" "$(BUILDDIR)/spelling" -q -E $(SPHINXOPTS) 2>&1 && touch $@.ok) > $(BUILDDIR)/warnings.txt
-	@if grep -q -v $(IGNOREDWARNINGS) $(BUILDDIR)/warnings.txt; then \
-		echo "Please fix the following documentation warnings:"; \
-		grep -v $(IGNOREDWARNINGS) "$(BUILDDIR)/warnings.txt"; \
-		exit 1; \
-	fi
-	@if [ "$$(wc -l < "$(BUILDDIR)/spelling/output.txt")" -ne "0" ]; then \
-	        echo ""; \
-		echo "Please fix the following spelling mistakes:"; \
-		sed 's/^/* Documentation\//' $(BUILDDIR)/spelling/output.txt; \
-		echo "If the words are not misspelled, run:"; \
-		echo -n "Documentation/update-spelling_wordlist.sh "; \
-		echo "`sed -E 's/^([^:]+:){2} \((.*)\)/\2/g' $(BUILDDIR)/spelling/output.txt | sort -u | tr -d '\r\n' | sed "s/'/\\\\\\\\'/g"`"; \
-		echo ""; \
-		exit 1; \
-	fi
-	#                                                                                                               ^^^^^^ replace FOO'bar with FOO\'bar
-	@rm $@.ok 2>/dev/null
-
-# To use checklinks with `make render-docs`,
-# edit the line `%: Makefile check-requirements check-build checklinks`
-checklinks:
-	$(QUIET)$(SPHINXBUILD) -b linkcheck -d "$(BUILDDIR)/doctrees" "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS)
-
-.PHONY: clean
-# Removes build directory
 clean:
-	rm -rf $(BUILDDIR)
-.PHONY: help Makefile ../Makefile.quiet check-requirements cmdref
+	-$(QUIET)rm -rf _build _preview Pipfile Pipfile.lock
 
-# Catch-all target: route all unknown targets to Sphinx using the new
-# "make mode" option.  $(O) is meant as a shortcut for $(SPHINXOPTS).
-%: Makefile check-go-version check-requirements check-build
+builder-image: Dockerfile requirements.txt
+	$(QUIET)tar c requirements.txt Dockerfile \
+	  | $(CONTAINER_ENGINE) build --tag cilium/docs-builder -
+
+READTHEDOCS_VERSION:=$(READTHEDOCS_VERSION)
+DOCKER_CTR := $(CONTAINER_ENGINE) container run --rm \
+		--workdir /src/Documentation \
+		--volume $(CURDIR)/..:/src \
+		--env READTHEDOCS_VERSION=$(READTHEDOCS_VERSION) \
+		--env SKIP_LINT=$(SKIP_LINT) \
+		--user "$(shell id -u):$(shell id -g)"
+DOCKER_RUN := $(DOCKER_CTR) cilium/docs-builder
+
+update-cmdref: builder-image
+	@$(ECHO_GEN)cmdref
+	-$(QUIET)rm -rf cmdref/cilium*.md
+	$(QUIET)$(DOCKER_RUN) ./update-cmdref.sh
+
+check: builder-image update-cmdref
+	@$(ECHO_CHECK) cmdref
+	$(QUIET)$(DOCKER_RUN) ./check-cmdref.sh
+	@$(ECHO_CHECK) examples
+	$(QUIET)$(DOCKER_RUN) ./check-examples.sh
+
+ifeq ($(V),0)
+SPHINX_OPTS += -q
+endif
+
+copy-api:
+	@$(ECHO_GEN)_api
+	$(QUIET)cp -r ../api _api
+
+epub latex html: builder-image copy-api
 	@$(ECHO_GEN)_build/$@
-	$(QUIET)$(SPHINXBUILD) -M $@ "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
+	$(QUIET)$(DOCKER_RUN) ./check-build.sh $(@) $(SPHINX_OPTS)
+
+html-netlify: copy-api
+	@$(ECHO_GEN)_build/$@
+	$(QUIET) SKIP_LINT=1 ./check-build.sh html $(SPHINX_OPTS)
+
+DOCS_PORT = 9082
+
+run-server: stop-server
+	# Work around Docker issue where this directory is created as root in
+	# the `--volume` parameter below. See also GH-10869.
+	$(QUIET)mkdir -p $(CURDIR)/_build/html/
+	$(QUIET)$(CONTAINER_ENGINE) container run --rm \
+		--detach \
+		--interactive \
+		--tty \
+		--name docs-cilium \
+		--publish $(DOCS_PORT):80 \
+		--volume $(CURDIR)/_build/html/:/usr/local/apache2/htdocs/ \
+			httpd:2.4
+	@echo "$$(tput setaf 2)Running at http://localhost:$(DOCS_PORT)$$(tput sgr0)"
+
+stop-server:
+	-$(QUIET)$(CONTAINER_ENGINE) container rm --force --volumes docs-cilium 2>/dev/null
+
+live-preview: stop-server
+	@echo "$$(tput setaf 2)Running at http://localhost:$(DOCS_PORT)$$(tput sgr0)"
+	$(QUIET)$(DOCKER_CTR) \
+		--publish $(DOCS_PORT):8000 \
+			cilium/docs-builder \
+		sphinx-autobuild -B -H 0.0.0.0 $(SPHINX_OPTS) -i *.swp -Q . _preview

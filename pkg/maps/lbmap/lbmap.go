@@ -17,12 +17,15 @@ package lbmap
 import (
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
 
 	"github.com/cilium/cilium/pkg/bpf"
+	"github.com/cilium/cilium/pkg/cidr"
 	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/maglev"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/u8proto"
 
@@ -31,13 +34,47 @@ import (
 
 var log = logging.DefaultLogger.WithField(logfields.LogSubsys, "map-lb")
 
-const (
-	// Maximum number of entries in each hashtable
+var (
+	// MaxEntries contains the maximum number of entries that are allowed
+	// in Cilium LB service, backend and affinity maps.
 	MaxEntries = 65536
 )
 
 // LBBPFMap is an implementation of the LBMap interface.
-type LBBPFMap struct{}
+type LBBPFMap struct {
+	// Buffer used to avoid excessive allocations to temporarily store backend
+	// IDs. Concurrent access is protected by the
+	// pkg/service.go:(Service).UpsertService() lock.
+	maglevBackendIDsBuffer []uint16
+	maglevTableSize        uint64
+}
+
+func New(maglev bool, maglevTableSize int) *LBBPFMap {
+	m := &LBBPFMap{}
+
+	if maglev {
+		m.maglevBackendIDsBuffer = make([]uint16, maglevTableSize)
+		m.maglevTableSize = uint64(maglevTableSize)
+	}
+
+	return m
+}
+
+type UpsertServiceParams struct {
+	ID                        uint16
+	IP                        net.IP
+	Port                      uint16
+	Backends                  map[string]uint16
+	PrevBackendCount          int
+	IPv6                      bool
+	Type                      loadbalancer.SVCType
+	Local                     bool
+	Scope                     uint8
+	SessionAffinity           bool
+	SessionAffinityTimeoutSec uint32
+	CheckSourceRange          bool
+	UseMaglev                 bool
+}
 
 // UpsertService inserts or updates the given service in a BPF map.
 //
@@ -46,32 +83,53 @@ type LBBPFMap struct{}
 //
 // The given prevBackendCount denotes a previous service backend entries count,
 // so that the function can remove obsolete ones.
-func (*LBBPFMap) UpsertService(
-	svcID uint16, svcIP net.IP, svcPort uint16,
-	backendIDs []uint16, prevBackendCount int,
-	ipv6 bool, svcType loadbalancer.SVCType, svcLocal bool) error {
-
+func (lbmap *LBBPFMap) UpsertService(p *UpsertServiceParams) error {
 	var svcKey ServiceKey
 
-	if svcID == 0 {
+	if p.ID == 0 {
 		return fmt.Errorf("Invalid svc ID 0")
 	}
 
-	if ipv6 {
-		svcKey = NewService6Key(svcIP, svcPort, u8proto.ANY, 0)
+	if p.IPv6 {
+		svcKey = NewService6Key(p.IP, p.Port, u8proto.ANY, p.Scope, 0)
 	} else {
-		svcKey = NewService4Key(svcIP, svcPort, u8proto.ANY, 0)
+		svcKey = NewService4Key(p.IP, p.Port, u8proto.ANY, p.Scope, 0)
 	}
 
 	slot := 1
 	svcVal := svcKey.NewValue().(ServiceValue)
+
+	if p.UseMaglev && len(p.Backends) != 0 {
+		backendNames := make([]string, 0, len(p.Backends))
+		for name := range p.Backends {
+			backendNames = append(backendNames, name)
+		}
+		// Maglev algorithm might produce different lookup table for the same
+		// set of backends listed in a different order. To avoid that sort
+		// backends by name, as the names are the same on all nodes (in opposite
+		// to backend IDs which are node-local).
+		sort.Strings(backendNames)
+		table := maglev.GetLookupTable(backendNames, lbmap.maglevTableSize)
+		for i, pos := range table {
+			lbmap.maglevBackendIDsBuffer[i] = p.Backends[backendNames[pos]]
+		}
+
+		if err := updateMaglevTable(p.IPv6, p.ID, lbmap.maglevBackendIDsBuffer); err != nil {
+			return err
+		}
+	}
+
+	backendIDs := make([]uint16, 0, len(p.Backends))
+	for _, id := range p.Backends {
+		backendIDs = append(backendIDs, id)
+	}
 	for _, backendID := range backendIDs {
 		if backendID == 0 {
 			return fmt.Errorf("Invalid backend ID 0")
 		}
 		svcVal.SetBackendID(loadbalancer.BackendID(backendID))
-		svcVal.SetRevNat(int(svcID))
-		svcKey.SetSlave(slot) // TODO(brb) Rename to SetSlot
+		svcVal.SetRevNat(int(p.ID))
+		svcKey.SetBackendSlot(slot)
 		if err := updateServiceEndpoint(svcKey, svcVal); err != nil {
 			return fmt.Errorf("Unable to update service entry %+v => %+v: %s",
 				svcKey, svcVal, err)
@@ -80,24 +138,26 @@ func (*LBBPFMap) UpsertService(
 	}
 
 	zeroValue := svcKey.NewValue().(ServiceValue)
-	zeroValue.SetRevNat(int(svcID)) // TODO change to uint16
+	zeroValue.SetRevNat(int(p.ID)) // TODO change to uint16
 	revNATKey := zeroValue.RevNatKey()
 	revNATValue := svcKey.RevNatValue()
 	if err := updateRevNatLocked(revNATKey, revNATValue); err != nil {
 		return fmt.Errorf("Unable to update reverse NAT %+v => %+v: %s", revNATKey, revNATValue, err)
 	}
 
-	if err := updateMasterService(svcKey, len(backendIDs), int(svcID), svcType, svcLocal); err != nil {
+	if err := updateMasterService(svcKey, len(backendIDs), int(p.ID), p.Type, p.Local,
+		p.SessionAffinity, p.SessionAffinityTimeoutSec, p.CheckSourceRange); err != nil {
+
 		deleteRevNatLocked(revNATKey)
 		return fmt.Errorf("Unable to update service %+v: %s", svcKey, err)
 	}
 
-	for i := slot; i <= prevBackendCount; i++ {
-		svcKey.SetSlave(i)
+	for i := slot; i <= p.PrevBackendCount; i++ {
+		svcKey.SetBackendSlot(i)
 		if err := deleteServiceLocked(svcKey); err != nil {
 			log.WithFields(logrus.Fields{
-				logfields.ServiceKey: svcKey,
-				logfields.SlaveSlot:  svcKey.GetSlave(),
+				logfields.ServiceKey:  svcKey,
+				logfields.BackendSlot: svcKey.GetBackendSlot(),
 			}).WithError(err).Warn("Unable to delete service entry from BPF map")
 		}
 	}
@@ -106,7 +166,7 @@ func (*LBBPFMap) UpsertService(
 }
 
 // DeleteService removes given service from a BPF map.
-func (*LBBPFMap) DeleteService(svc loadbalancer.L3n4AddrID, backendCount int) error {
+func (*LBBPFMap) DeleteService(svc loadbalancer.L3n4AddrID, backendCount int, useMaglev bool) error {
 	var (
 		svcKey    ServiceKey
 		revNATKey RevNatKey
@@ -116,18 +176,25 @@ func (*LBBPFMap) DeleteService(svc loadbalancer.L3n4AddrID, backendCount int) er
 		return fmt.Errorf("Invalid svc ID 0")
 	}
 
-	if svc.IsIPv6() {
-		svcKey = NewService6Key(svc.IP, svc.Port, u8proto.ANY, 0)
+	ipv6 := svc.IsIPv6()
+	if ipv6 {
+		svcKey = NewService6Key(svc.IP, svc.Port, u8proto.ANY, svc.Scope, 0)
 		revNATKey = NewRevNat6Key(uint16(svc.ID))
 	} else {
-		svcKey = NewService4Key(svc.IP, svc.Port, u8proto.ANY, 0)
+		svcKey = NewService4Key(svc.IP, svc.Port, u8proto.ANY, svc.Scope, 0)
 		revNATKey = NewRevNat4Key(uint16(svc.ID))
 	}
 
 	for slot := 0; slot <= backendCount; slot++ {
-		svcKey.SetSlave(slot)
+		svcKey.SetBackendSlot(slot)
 		if err := svcKey.MapDelete(); err != nil {
 			return fmt.Errorf("Unable to delete service entry %+v: %s", svcKey, err)
+		}
+	}
+
+	if useMaglev {
+		if err := deleteMaglevTable(ipv6, uint16(svc.ID)); err != nil {
+			return fmt.Errorf("Unable to delete maglev lookup table %d: %s", svc.ID, err)
 		}
 	}
 
@@ -187,6 +254,66 @@ func (*LBBPFMap) DeleteBackendByID(id uint16, ipv6 bool) error {
 	return nil
 }
 
+// DeleteAffinityMatch removes the affinity match for the given svc and backend ID
+// tuple from the BPF map
+func (*LBBPFMap) DeleteAffinityMatch(revNATID uint16, backendID uint16) error {
+	return AffinityMatchMap.Delete(
+		NewAffinityMatchKey(revNATID, uint32(backendID)).ToNetwork())
+}
+
+// AddAffinityMatch adds the given affinity match to the BPF map.
+func (*LBBPFMap) AddAffinityMatch(revNATID uint16, backendID uint16) error {
+	return AffinityMatchMap.Update(
+		NewAffinityMatchKey(revNATID, uint32(backendID)).ToNetwork(),
+		&AffinityMatchValue{})
+}
+
+// DumpAffinityMatches returns the affinity match map represented as a nested
+// map which first key is svc ID and the second - backend ID.
+func (*LBBPFMap) DumpAffinityMatches() (BackendIDByServiceIDSet, error) {
+	matches := BackendIDByServiceIDSet{}
+
+	parse := func(key bpf.MapKey, value bpf.MapValue) {
+		matchKey := key.DeepCopyMapKey().(*AffinityMatchKey)
+		svcID := matchKey.RevNATID
+		backendID := uint16(matchKey.BackendID) // currently backend_id is u16
+
+		if _, ok := matches[svcID]; !ok {
+			matches[svcID] = map[uint16]struct{}{}
+		}
+		matches[svcID][backendID] = struct{}{}
+	}
+
+	err := AffinityMatchMap.DumpWithCallback(parse)
+	if err != nil {
+		return nil, err
+	}
+
+	return matches, nil
+}
+
+func (*LBBPFMap) DumpSourceRanges(ipv6 bool) (SourceRangeSetByServiceID, error) {
+	ret := SourceRangeSetByServiceID{}
+	parser := func(key bpf.MapKey, value bpf.MapValue) {
+		k := key.(SourceRangeKey)
+		revNATID := k.GetRevNATID()
+		if _, found := ret[revNATID]; !found {
+			ret[revNATID] = []*cidr.CIDR{}
+		}
+		ret[revNATID] = append(ret[revNATID], k.GetCIDR())
+	}
+
+	m := SourceRange4Map
+	if ipv6 {
+		m = SourceRange6Map
+	}
+	if err := m.DumpWithCallback(parser); err != nil {
+		return nil, err
+	}
+
+	return ret, nil
+}
+
 func updateRevNatLocked(key RevNatKey, value RevNatValue) error {
 	if key.GetKey() == 0 {
 		return fmt.Errorf("invalid RevNat ID (0)")
@@ -200,6 +327,38 @@ func updateRevNatLocked(key RevNatKey, value RevNatValue) error {
 
 func deleteRevNatLocked(key RevNatKey) error {
 	return key.Map().Delete(key.ToNetwork())
+}
+
+func (*LBBPFMap) UpdateSourceRanges(revNATID uint16, prevSourceRanges []*cidr.CIDR,
+	sourceRanges []*cidr.CIDR, ipv6 bool) error {
+
+	m := SourceRange4Map
+	if ipv6 {
+		m = SourceRange6Map
+	}
+
+	srcRangeMap := map[string]*cidr.CIDR{}
+	for _, cidr := range sourceRanges {
+		srcRangeMap[cidr.String()] = cidr
+	}
+
+	for _, prevCIDR := range prevSourceRanges {
+		if _, found := srcRangeMap[prevCIDR.String()]; !found {
+			if err := m.Delete(srcRangeKey(prevCIDR, revNATID, ipv6)); err != nil {
+				return err
+			}
+		} else {
+			delete(srcRangeMap, prevCIDR.String())
+		}
+	}
+
+	for _, cidr := range srcRangeMap {
+		if err := m.Update(srcRangeKey(cidr, revNATID, ipv6), &SourceRangeValue{}); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // DumpServiceMaps dumps the services from the BPF maps.
@@ -222,7 +381,7 @@ func (*LBBPFMap) DumpServiceMaps() ([]*loadbalancer.SVC, []error) {
 		fe := svcFrontend(svcKey, svcValue)
 
 		// Create master entry in case there are no backends.
-		if svcKey.GetSlave() == 0 {
+		if svcKey.GetBackendSlot() == 0 {
 			// Build a cache of flags stored in the value of the master key to
 			// map it later.
 			// FIXME proto is being ignored everywhere in the datapath.
@@ -242,7 +401,7 @@ func (*LBBPFMap) DumpServiceMaps() ([]*loadbalancer.SVC, []error) {
 		}
 
 		be := svcBackend(backendID, backendValue)
-		newSVCMap.addFEnBE(fe, be, svcKey.GetSlave())
+		newSVCMap.addFEnBE(fe, be, svcKey.GetBackendSlot())
 	}
 
 	if option.Config.EnableIPv4 {
@@ -322,12 +481,25 @@ func (*LBBPFMap) DumpBackendMaps() ([]*loadbalancer.Backend, error) {
 	return lbBackends, nil
 }
 
-func updateMasterService(fe ServiceKey, nbackends int, revNATID int, svcType loadbalancer.SVCType, svcLocal bool) error {
-	fe.SetSlave(0)
+func updateMasterService(fe ServiceKey, nbackends int, revNATID int, svcType loadbalancer.SVCType,
+	svcLocal bool, sessionAffinity bool, sessionAffinityTimeoutSec uint32,
+	checkSourceRange bool) error {
+
+	fe.SetBackendSlot(0)
 	zeroValue := fe.NewValue().(ServiceValue)
 	zeroValue.SetCount(nbackends)
 	zeroValue.SetRevNat(revNATID)
-	zeroValue.SetFlags(loadbalancer.CreateSvcFlag(svcLocal, svcType).UInt8())
+	flag := loadbalancer.NewSvcFlag(&loadbalancer.SvcFlagParam{
+		SvcType:          svcType,
+		SvcLocal:         svcLocal,
+		SessionAffinity:  sessionAffinity,
+		IsRoutable:       !fe.IsSurrogate(),
+		CheckSourceRange: checkSourceRange,
+	})
+	zeroValue.SetFlags(flag.UInt16())
+	if sessionAffinity {
+		zeroValue.SetSessionAffinityTimeoutSec(sessionAffinityTimeoutSec)
+	}
 
 	return updateServiceEndpoint(fe, zeroValue)
 }
@@ -351,10 +523,10 @@ func updateServiceEndpoint(key ServiceKey, value ServiceValue) error {
 	log.WithFields(logrus.Fields{
 		logfields.ServiceKey:   key,
 		logfields.ServiceValue: value,
-		logfields.SlaveSlot:    key.GetSlave(),
+		logfields.BackendSlot:  key.GetBackendSlot(),
 	}).Debug("Upserting service entry")
 
-	if key.GetSlave() != 0 && value.RevNatKey().GetKey() == 0 {
+	if key.GetBackendSlot() != 0 && value.RevNatKey().GetKey() == 0 {
 		return fmt.Errorf("invalid RevNat ID (0) in the Service Value")
 	}
 	if _, err := key.Map().OpenOrCreate(); err != nil {
@@ -417,4 +589,12 @@ func (svcs svcMap) addFEnBE(fe *loadbalancer.L3n4AddrID, be *loadbalancer.Backen
 
 	svcs[hash] = lbsvc
 	return &lbsvc
+}
+
+// InitMapInfo updates the map info defaults for sock rev nat {4,6} and lb maps.
+func InitMapInfo(maxSockRevNatEntries, lbMapMaxEntries int) {
+	MaxSockRevNat4MapEntries = maxSockRevNatEntries
+	MaxSockRevNat6MapEntries = maxSockRevNatEntries
+
+	MaxEntries = lbMapMaxEntries
 }

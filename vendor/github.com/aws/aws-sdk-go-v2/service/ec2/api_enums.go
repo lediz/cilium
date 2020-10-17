@@ -321,13 +321,14 @@ type ByoipCidrState string
 
 // Enum values for ByoipCidrState
 const (
-	ByoipCidrStateAdvertised         ByoipCidrState = "advertised"
-	ByoipCidrStateDeprovisioned      ByoipCidrState = "deprovisioned"
-	ByoipCidrStateFailedDeprovision  ByoipCidrState = "failed-deprovision"
-	ByoipCidrStateFailedProvision    ByoipCidrState = "failed-provision"
-	ByoipCidrStatePendingDeprovision ByoipCidrState = "pending-deprovision"
-	ByoipCidrStatePendingProvision   ByoipCidrState = "pending-provision"
-	ByoipCidrStateProvisioned        ByoipCidrState = "provisioned"
+	ByoipCidrStateAdvertised                         ByoipCidrState = "advertised"
+	ByoipCidrStateDeprovisioned                      ByoipCidrState = "deprovisioned"
+	ByoipCidrStateFailedDeprovision                  ByoipCidrState = "failed-deprovision"
+	ByoipCidrStateFailedProvision                    ByoipCidrState = "failed-provision"
+	ByoipCidrStatePendingDeprovision                 ByoipCidrState = "pending-deprovision"
+	ByoipCidrStatePendingProvision                   ByoipCidrState = "pending-provision"
+	ByoipCidrStateProvisioned                        ByoipCidrState = "provisioned"
+	ByoipCidrStateProvisionedNotPubliclyAdvertisable ByoipCidrState = "provisioned-not-publicly-advertisable"
 )
 
 func (enum ByoipCidrState) MarshalValue() (string, error) {
@@ -732,6 +733,24 @@ func (enum DiskType) MarshalValueBuf(b []byte) ([]byte, error) {
 	return append(b, enum...), nil
 }
 
+type DnsNameState string
+
+// Enum values for DnsNameState
+const (
+	DnsNameStatePendingVerification DnsNameState = "pendingVerification"
+	DnsNameStateVerified            DnsNameState = "verified"
+	DnsNameStateFailed              DnsNameState = "failed"
+)
+
+func (enum DnsNameState) MarshalValue() (string, error) {
+	return string(enum), nil
+}
+
+func (enum DnsNameState) MarshalValueBuf(b []byte) ([]byte, error) {
+	b = b[0:0]
+	return append(b, enum...), nil
+}
+
 type DnsSupportValue string
 
 // Enum values for DnsSupportValue
@@ -779,6 +798,24 @@ func (enum EbsEncryptionSupport) MarshalValue() (string, error) {
 }
 
 func (enum EbsEncryptionSupport) MarshalValueBuf(b []byte) ([]byte, error) {
+	b = b[0:0]
+	return append(b, enum...), nil
+}
+
+type EbsNvmeSupport string
+
+// Enum values for EbsNvmeSupport
+const (
+	EbsNvmeSupportUnsupported EbsNvmeSupport = "unsupported"
+	EbsNvmeSupportSupported   EbsNvmeSupport = "supported"
+	EbsNvmeSupportRequired    EbsNvmeSupport = "required"
+)
+
+func (enum EbsNvmeSupport) MarshalValue() (string, error) {
+	return string(enum), nil
+}
+
+func (enum EbsNvmeSupport) MarshalValueBuf(b []byte) ([]byte, error) {
 	b = b[0:0]
 	return append(b, enum...), nil
 }
@@ -997,6 +1034,22 @@ func (enum FleetActivityStatus) MarshalValue() (string, error) {
 }
 
 func (enum FleetActivityStatus) MarshalValueBuf(b []byte) ([]byte, error) {
+	b = b[0:0]
+	return append(b, enum...), nil
+}
+
+type FleetCapacityReservationUsageStrategy string
+
+// Enum values for FleetCapacityReservationUsageStrategy
+const (
+	FleetCapacityReservationUsageStrategyUseCapacityReservationsFirst FleetCapacityReservationUsageStrategy = "use-capacity-reservations-first"
+)
+
+func (enum FleetCapacityReservationUsageStrategy) MarshalValue() (string, error) {
+	return string(enum), nil
+}
+
+func (enum FleetCapacityReservationUsageStrategy) MarshalValueBuf(b []byte) ([]byte, error) {
 	b = b[0:0]
 	return append(b, enum...), nil
 }
@@ -1573,6 +1626,15 @@ const (
 	InstanceTypeR5ad12xlarge InstanceType = "r5ad.12xlarge"
 	InstanceTypeR5ad16xlarge InstanceType = "r5ad.16xlarge"
 	InstanceTypeR5ad24xlarge InstanceType = "r5ad.24xlarge"
+	InstanceTypeR6gMetal     InstanceType = "r6g.metal"
+	InstanceTypeR6gMedium    InstanceType = "r6g.medium"
+	InstanceTypeR6gLarge     InstanceType = "r6g.large"
+	InstanceTypeR6gXlarge    InstanceType = "r6g.xlarge"
+	InstanceTypeR6g2xlarge   InstanceType = "r6g.2xlarge"
+	InstanceTypeR6g4xlarge   InstanceType = "r6g.4xlarge"
+	InstanceTypeR6g8xlarge   InstanceType = "r6g.8xlarge"
+	InstanceTypeR6g12xlarge  InstanceType = "r6g.12xlarge"
+	InstanceTypeR6g16xlarge  InstanceType = "r6g.16xlarge"
 	InstanceTypeX116xlarge   InstanceType = "x1.16xlarge"
 	InstanceTypeX132xlarge   InstanceType = "x1.32xlarge"
 	InstanceTypeX1eXlarge    InstanceType = "x1e.xlarge"
@@ -1623,6 +1685,14 @@ const (
 	InstanceTypeC518xlarge   InstanceType = "c5.18xlarge"
 	InstanceTypeC524xlarge   InstanceType = "c5.24xlarge"
 	InstanceTypeC5Metal      InstanceType = "c5.metal"
+	InstanceTypeC5aLarge     InstanceType = "c5a.large"
+	InstanceTypeC5aXlarge    InstanceType = "c5a.xlarge"
+	InstanceTypeC5a2xlarge   InstanceType = "c5a.2xlarge"
+	InstanceTypeC5a4xlarge   InstanceType = "c5a.4xlarge"
+	InstanceTypeC5a8xlarge   InstanceType = "c5a.8xlarge"
+	InstanceTypeC5a12xlarge  InstanceType = "c5a.12xlarge"
+	InstanceTypeC5a16xlarge  InstanceType = "c5a.16xlarge"
+	InstanceTypeC5a24xlarge  InstanceType = "c5a.24xlarge"
 	InstanceTypeC5dLarge     InstanceType = "c5d.large"
 	InstanceTypeC5dXlarge    InstanceType = "c5d.xlarge"
 	InstanceTypeC5d2xlarge   InstanceType = "c5d.2xlarge"
@@ -1638,6 +1708,15 @@ const (
 	InstanceTypeC5n4xlarge   InstanceType = "c5n.4xlarge"
 	InstanceTypeC5n9xlarge   InstanceType = "c5n.9xlarge"
 	InstanceTypeC5n18xlarge  InstanceType = "c5n.18xlarge"
+	InstanceTypeC6gMetal     InstanceType = "c6g.metal"
+	InstanceTypeC6gMedium    InstanceType = "c6g.medium"
+	InstanceTypeC6gLarge     InstanceType = "c6g.large"
+	InstanceTypeC6gXlarge    InstanceType = "c6g.xlarge"
+	InstanceTypeC6g2xlarge   InstanceType = "c6g.2xlarge"
+	InstanceTypeC6g4xlarge   InstanceType = "c6g.4xlarge"
+	InstanceTypeC6g8xlarge   InstanceType = "c6g.8xlarge"
+	InstanceTypeC6g12xlarge  InstanceType = "c6g.12xlarge"
+	InstanceTypeC6g16xlarge  InstanceType = "c6g.16xlarge"
 	InstanceTypeCc14xlarge   InstanceType = "cc1.4xlarge"
 	InstanceTypeCc28xlarge   InstanceType = "cc2.8xlarge"
 	InstanceTypeG22xlarge    InstanceType = "g2.2xlarge"
@@ -1652,6 +1731,7 @@ const (
 	InstanceTypeG4dn8xlarge  InstanceType = "g4dn.8xlarge"
 	InstanceTypeG4dn12xlarge InstanceType = "g4dn.12xlarge"
 	InstanceTypeG4dn16xlarge InstanceType = "g4dn.16xlarge"
+	InstanceTypeG4dnMetal    InstanceType = "g4dn.metal"
 	InstanceTypeCg14xlarge   InstanceType = "cg1.4xlarge"
 	InstanceTypeP2Xlarge     InstanceType = "p2.xlarge"
 	InstanceTypeP28xlarge    InstanceType = "p2.8xlarge"
@@ -1759,6 +1839,15 @@ const (
 	InstanceTypeInf12xlarge  InstanceType = "inf1.2xlarge"
 	InstanceTypeInf16xlarge  InstanceType = "inf1.6xlarge"
 	InstanceTypeInf124xlarge InstanceType = "inf1.24xlarge"
+	InstanceTypeM6gMetal     InstanceType = "m6g.metal"
+	InstanceTypeM6gMedium    InstanceType = "m6g.medium"
+	InstanceTypeM6gLarge     InstanceType = "m6g.large"
+	InstanceTypeM6gXlarge    InstanceType = "m6g.xlarge"
+	InstanceTypeM6g2xlarge   InstanceType = "m6g.2xlarge"
+	InstanceTypeM6g4xlarge   InstanceType = "m6g.4xlarge"
+	InstanceTypeM6g8xlarge   InstanceType = "m6g.8xlarge"
+	InstanceTypeM6g12xlarge  InstanceType = "m6g.12xlarge"
+	InstanceTypeM6g16xlarge  InstanceType = "m6g.16xlarge"
 )
 
 func (enum InstanceType) MarshalValue() (string, error) {
@@ -1838,6 +1927,57 @@ func (enum LaunchTemplateErrorCode) MarshalValue() (string, error) {
 }
 
 func (enum LaunchTemplateErrorCode) MarshalValueBuf(b []byte) ([]byte, error) {
+	b = b[0:0]
+	return append(b, enum...), nil
+}
+
+type LaunchTemplateHttpTokensState string
+
+// Enum values for LaunchTemplateHttpTokensState
+const (
+	LaunchTemplateHttpTokensStateOptional LaunchTemplateHttpTokensState = "optional"
+	LaunchTemplateHttpTokensStateRequired LaunchTemplateHttpTokensState = "required"
+)
+
+func (enum LaunchTemplateHttpTokensState) MarshalValue() (string, error) {
+	return string(enum), nil
+}
+
+func (enum LaunchTemplateHttpTokensState) MarshalValueBuf(b []byte) ([]byte, error) {
+	b = b[0:0]
+	return append(b, enum...), nil
+}
+
+type LaunchTemplateInstanceMetadataEndpointState string
+
+// Enum values for LaunchTemplateInstanceMetadataEndpointState
+const (
+	LaunchTemplateInstanceMetadataEndpointStateDisabled LaunchTemplateInstanceMetadataEndpointState = "disabled"
+	LaunchTemplateInstanceMetadataEndpointStateEnabled  LaunchTemplateInstanceMetadataEndpointState = "enabled"
+)
+
+func (enum LaunchTemplateInstanceMetadataEndpointState) MarshalValue() (string, error) {
+	return string(enum), nil
+}
+
+func (enum LaunchTemplateInstanceMetadataEndpointState) MarshalValueBuf(b []byte) ([]byte, error) {
+	b = b[0:0]
+	return append(b, enum...), nil
+}
+
+type LaunchTemplateInstanceMetadataOptionsState string
+
+// Enum values for LaunchTemplateInstanceMetadataOptionsState
+const (
+	LaunchTemplateInstanceMetadataOptionsStatePending LaunchTemplateInstanceMetadataOptionsState = "pending"
+	LaunchTemplateInstanceMetadataOptionsStateApplied LaunchTemplateInstanceMetadataOptionsState = "applied"
+)
+
+func (enum LaunchTemplateInstanceMetadataOptionsState) MarshalValue() (string, error) {
+	return string(enum), nil
+}
+
+func (enum LaunchTemplateInstanceMetadataOptionsState) MarshalValueBuf(b []byte) ([]byte, error) {
 	b = b[0:0]
 	return append(b, enum...), nil
 }
@@ -1981,6 +2121,23 @@ func (enum MembershipType) MarshalValue() (string, error) {
 }
 
 func (enum MembershipType) MarshalValueBuf(b []byte) ([]byte, error) {
+	b = b[0:0]
+	return append(b, enum...), nil
+}
+
+type ModifyAvailabilityZoneOptInStatus string
+
+// Enum values for ModifyAvailabilityZoneOptInStatus
+const (
+	ModifyAvailabilityZoneOptInStatusOptedIn    ModifyAvailabilityZoneOptInStatus = "opted-in"
+	ModifyAvailabilityZoneOptInStatusNotOptedIn ModifyAvailabilityZoneOptInStatus = "not-opted-in"
+)
+
+func (enum ModifyAvailabilityZoneOptInStatus) MarshalValue() (string, error) {
+	return string(enum), nil
+}
+
+func (enum ModifyAvailabilityZoneOptInStatus) MarshalValueBuf(b []byte) ([]byte, error) {
 	b = b[0:0]
 	return append(b, enum...), nil
 }
@@ -2327,6 +2484,33 @@ func (enum PlatformValues) MarshalValueBuf(b []byte) ([]byte, error) {
 	return append(b, enum...), nil
 }
 
+type PrefixListState string
+
+// Enum values for PrefixListState
+const (
+	PrefixListStateCreateInProgress  PrefixListState = "create-in-progress"
+	PrefixListStateCreateComplete    PrefixListState = "create-complete"
+	PrefixListStateCreateFailed      PrefixListState = "create-failed"
+	PrefixListStateModifyInProgress  PrefixListState = "modify-in-progress"
+	PrefixListStateModifyComplete    PrefixListState = "modify-complete"
+	PrefixListStateModifyFailed      PrefixListState = "modify-failed"
+	PrefixListStateRestoreInProgress PrefixListState = "restore-in-progress"
+	PrefixListStateRestoreComplete   PrefixListState = "restore-complete"
+	PrefixListStateRestoreFailed     PrefixListState = "restore-failed"
+	PrefixListStateDeleteInProgress  PrefixListState = "delete-in-progress"
+	PrefixListStateDeleteComplete    PrefixListState = "delete-complete"
+	PrefixListStateDeleteFailed      PrefixListState = "delete-failed"
+)
+
+func (enum PrefixListState) MarshalValue() (string, error) {
+	return string(enum), nil
+}
+
+func (enum PrefixListState) MarshalValueBuf(b []byte) ([]byte, error) {
+	b = b[0:0]
+	return append(b, enum...), nil
+}
+
 type PrincipalType string
 
 // Enum values for PrincipalType
@@ -2517,40 +2701,49 @@ type ResourceType string
 
 // Enum values for ResourceType
 const (
-	ResourceTypeClientVpnEndpoint             ResourceType = "client-vpn-endpoint"
-	ResourceTypeCustomerGateway               ResourceType = "customer-gateway"
-	ResourceTypeDedicatedHost                 ResourceType = "dedicated-host"
-	ResourceTypeDhcpOptions                   ResourceType = "dhcp-options"
-	ResourceTypeElasticIp                     ResourceType = "elastic-ip"
-	ResourceTypeFleet                         ResourceType = "fleet"
-	ResourceTypeFpgaImage                     ResourceType = "fpga-image"
-	ResourceTypeHostReservation               ResourceType = "host-reservation"
-	ResourceTypeImage                         ResourceType = "image"
-	ResourceTypeInstance                      ResourceType = "instance"
-	ResourceTypeInternetGateway               ResourceType = "internet-gateway"
-	ResourceTypeLaunchTemplate                ResourceType = "launch-template"
-	ResourceTypeNatgateway                    ResourceType = "natgateway"
-	ResourceTypeNetworkAcl                    ResourceType = "network-acl"
-	ResourceTypeNetworkInterface              ResourceType = "network-interface"
-	ResourceTypeReservedInstances             ResourceType = "reserved-instances"
-	ResourceTypeRouteTable                    ResourceType = "route-table"
-	ResourceTypeSecurityGroup                 ResourceType = "security-group"
-	ResourceTypeSnapshot                      ResourceType = "snapshot"
-	ResourceTypeSpotFleetRequest              ResourceType = "spot-fleet-request"
-	ResourceTypeSpotInstancesRequest          ResourceType = "spot-instances-request"
-	ResourceTypeSubnet                        ResourceType = "subnet"
-	ResourceTypeTrafficMirrorFilter           ResourceType = "traffic-mirror-filter"
-	ResourceTypeTrafficMirrorSession          ResourceType = "traffic-mirror-session"
-	ResourceTypeTrafficMirrorTarget           ResourceType = "traffic-mirror-target"
-	ResourceTypeTransitGateway                ResourceType = "transit-gateway"
-	ResourceTypeTransitGatewayAttachment      ResourceType = "transit-gateway-attachment"
-	ResourceTypeTransitGatewayMulticastDomain ResourceType = "transit-gateway-multicast-domain"
-	ResourceTypeTransitGatewayRouteTable      ResourceType = "transit-gateway-route-table"
-	ResourceTypeVolume                        ResourceType = "volume"
-	ResourceTypeVpc                           ResourceType = "vpc"
-	ResourceTypeVpcPeeringConnection          ResourceType = "vpc-peering-connection"
-	ResourceTypeVpnConnection                 ResourceType = "vpn-connection"
-	ResourceTypeVpnGateway                    ResourceType = "vpn-gateway"
+	ResourceTypeClientVpnEndpoint                    ResourceType = "client-vpn-endpoint"
+	ResourceTypeCustomerGateway                      ResourceType = "customer-gateway"
+	ResourceTypeDedicatedHost                        ResourceType = "dedicated-host"
+	ResourceTypeDhcpOptions                          ResourceType = "dhcp-options"
+	ResourceTypeElasticIp                            ResourceType = "elastic-ip"
+	ResourceTypeElasticGpu                           ResourceType = "elastic-gpu"
+	ResourceTypeExportImageTask                      ResourceType = "export-image-task"
+	ResourceTypeExportInstanceTask                   ResourceType = "export-instance-task"
+	ResourceTypeFleet                                ResourceType = "fleet"
+	ResourceTypeFpgaImage                            ResourceType = "fpga-image"
+	ResourceTypeHostReservation                      ResourceType = "host-reservation"
+	ResourceTypeImage                                ResourceType = "image"
+	ResourceTypeImportImageTask                      ResourceType = "import-image-task"
+	ResourceTypeImportSnapshotTask                   ResourceType = "import-snapshot-task"
+	ResourceTypeInstance                             ResourceType = "instance"
+	ResourceTypeInternetGateway                      ResourceType = "internet-gateway"
+	ResourceTypeKeyPair                              ResourceType = "key-pair"
+	ResourceTypeLaunchTemplate                       ResourceType = "launch-template"
+	ResourceTypeLocalGatewayRouteTableVpcAssociation ResourceType = "local-gateway-route-table-vpc-association"
+	ResourceTypeNatgateway                           ResourceType = "natgateway"
+	ResourceTypeNetworkAcl                           ResourceType = "network-acl"
+	ResourceTypeNetworkInterface                     ResourceType = "network-interface"
+	ResourceTypePlacementGroup                       ResourceType = "placement-group"
+	ResourceTypeReservedInstances                    ResourceType = "reserved-instances"
+	ResourceTypeRouteTable                           ResourceType = "route-table"
+	ResourceTypeSecurityGroup                        ResourceType = "security-group"
+	ResourceTypeSnapshot                             ResourceType = "snapshot"
+	ResourceTypeSpotFleetRequest                     ResourceType = "spot-fleet-request"
+	ResourceTypeSpotInstancesRequest                 ResourceType = "spot-instances-request"
+	ResourceTypeSubnet                               ResourceType = "subnet"
+	ResourceTypeTrafficMirrorFilter                  ResourceType = "traffic-mirror-filter"
+	ResourceTypeTrafficMirrorSession                 ResourceType = "traffic-mirror-session"
+	ResourceTypeTrafficMirrorTarget                  ResourceType = "traffic-mirror-target"
+	ResourceTypeTransitGateway                       ResourceType = "transit-gateway"
+	ResourceTypeTransitGatewayAttachment             ResourceType = "transit-gateway-attachment"
+	ResourceTypeTransitGatewayMulticastDomain        ResourceType = "transit-gateway-multicast-domain"
+	ResourceTypeTransitGatewayRouteTable             ResourceType = "transit-gateway-route-table"
+	ResourceTypeVolume                               ResourceType = "volume"
+	ResourceTypeVpc                                  ResourceType = "vpc"
+	ResourceTypeVpcPeeringConnection                 ResourceType = "vpc-peering-connection"
+	ResourceTypeVpnConnection                        ResourceType = "vpn-connection"
+	ResourceTypeVpnGateway                           ResourceType = "vpn-gateway"
+	ResourceTypeVpcFlowLog                           ResourceType = "vpc-flow-log"
 )
 
 func (enum ResourceType) MarshalValue() (string, error) {
@@ -2647,6 +2840,23 @@ func (enum RuleAction) MarshalValue() (string, error) {
 }
 
 func (enum RuleAction) MarshalValueBuf(b []byte) ([]byte, error) {
+	b = b[0:0]
+	return append(b, enum...), nil
+}
+
+type Scope string
+
+// Enum values for Scope
+const (
+	ScopeAvailabilityZone Scope = "Availability Zone"
+	ScopeRegion           Scope = "Region"
+)
+
+func (enum Scope) MarshalValue() (string, error) {
+	return string(enum), nil
+}
+
+func (enum Scope) MarshalValueBuf(b []byte) ([]byte, error) {
 	b = b[0:0]
 	return append(b, enum...), nil
 }
@@ -3640,6 +3850,7 @@ type VpnAuthenticationType string
 const (
 	VpnAuthenticationTypeCertificateAuthentication      VpnAuthenticationType = "certificate-authentication"
 	VpnAuthenticationTypeDirectoryServiceAuthentication VpnAuthenticationType = "directory-service-authentication"
+	VpnAuthenticationTypeFederatedAuthentication        VpnAuthenticationType = "federated-authentication"
 )
 
 func (enum VpnAuthenticationType) MarshalValue() (string, error) {
@@ -3791,23 +4002,6 @@ func (enum VpnStaticRouteSource) MarshalValue() (string, error) {
 }
 
 func (enum VpnStaticRouteSource) MarshalValueBuf(b []byte) ([]byte, error) {
-	b = b[0:0]
-	return append(b, enum...), nil
-}
-
-type Scope string
-
-// Enum values for Scope
-const (
-	ScopeAvailabilityZone Scope = "Availability Zone"
-	ScopeRegion           Scope = "Region"
-)
-
-func (enum Scope) MarshalValue() (string, error) {
-	return string(enum), nil
-}
-
-func (enum Scope) MarshalValueBuf(b []byte) ([]byte, error) {
 	b = b[0:0]
 	return append(b, enum...), nil
 }

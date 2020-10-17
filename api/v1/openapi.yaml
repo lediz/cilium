@@ -37,7 +37,7 @@ paths:
       description: |
         Returns health and status information of the Cilium daemon and related
         components such as the local container runtime, connected datastore,
-        Kubernetes integration.
+        Kubernetes integration and Hubble.
       tags:
       - daemon
       parameters:
@@ -404,6 +404,7 @@ paths:
       parameters:
       - "$ref": "#/parameters/ipam-family"
       - "$ref": "#/parameters/ipam-owner"
+      - "$ref": "#/parameters/ipam-expiration"
       responses:
         '201':
           description: Success
@@ -954,6 +955,10 @@ parameters:
     name: owner
     in: query
     type: string
+  ipam-expiration:
+    name: expiration
+    in: header
+    type: boolean
   map-name:
     name: name
     description: Name of map
@@ -1116,11 +1121,13 @@ definitions:
       health:
         description: Summary overall endpoint & subcomponent health
         "$ref": "#/definitions/EndpointHealth"
+      namedPorts:
+        description: List of named ports that can be used in Network Policy
+        "$ref": "#/definitions/NamedPorts"
   EndpointState:
     description: State of endpoint
     type: string
     enum:
-      - creating
       - waiting-for-identity
       - not-ready
       - waiting-to-regenerate
@@ -1129,8 +1136,12 @@ definitions:
       - ready
       - disconnecting
       - disconnected
+      - invalid
   EndpointHealth:
-    description: Health of the endpoint
+    description: |-
+      Health of the endpoint
+
+      +deepequal-gen=true
     type: object
     properties:
       overallHealth:
@@ -1165,7 +1176,10 @@ definitions:
     items:
       "$ref": "#/definitions/EndpointStatusChange"
   EndpointStatusChange:
-    description: Indication of a change of status
+    description: |-
+      Indication of a change of status
+
+      +deepequal-gen=true
     type: object
     properties:
       timestamp:
@@ -1208,9 +1222,14 @@ definitions:
       - ingress
       - egress
       - both
-
+      - audit-ingress
+      - audit-egress
+      - audit-both
   EndpointPolicy:
-    description: Policy information of an endpoint
+    description: |-
+      Policy information of an endpoint
+
+      +k8s:deepcopy-gen=true
     type: object
     properties:
       policy-revision:
@@ -1231,9 +1250,21 @@ definitions:
         type: array
         items:
           type: integer
+      denied-ingress-identities:
+        description: |
+          List of identities not allowed to communicate to this endpoint
+        type: array
+        items:
+          type: integer
       allowed-egress-identities:
         description: |
           List of identities to which this endpoint is allowed to communicate
+        type: array
+        items:
+          type: integer
+      denied-egress-identities:
+        description: |
+          List of identities to which this endpoint is not allowed to communicate
         type: array
         items:
           type: integer
@@ -1242,7 +1273,10 @@ definitions:
       cidr-policy:
         "$ref": "#/definitions/CIDRPolicy"
   PolicyRule:
-    description: A policy rule including the rule labels it derives from
+    description: |-
+      A policy rule including the rule labels it derives from
+
+      +k8s:deepcopy-gen=true
     properties:
       rule:
         description: The policy rule as json
@@ -1255,7 +1289,10 @@ definitions:
           items:
             type: string
   L4Policy:
-    description: L4 endpoint policy
+    description: |-
+      L4 endpoint policy
+
+      +k8s:deepcopy-gen=true
     type: object
     properties:
       ingress:
@@ -1269,7 +1306,10 @@ definitions:
         items:
           "$ref": "#/definitions/PolicyRule"
   CIDRPolicy:
-    description: CIDR endpoint policy
+    description: |-
+      CIDR endpoint policy
+
+      +k8s:deepcopy-gen=true
     type: object
     properties:
       ingress:
@@ -1383,6 +1423,11 @@ definitions:
       master-mac:
         type: string
         description: MAC of master interface if address is a slave/secondary of a master interface
+      expiration-uuid:
+        type: string
+        description: |
+          The UUID for the expiration timer. Set when expiration has been
+          enabled while allocating.
   AddressPair:
     description: Addressing information of an endpoint
     type: object
@@ -1390,8 +1435,14 @@ definitions:
       ipv4:
         description: IPv4 address
         type: string
+      ipv4-expiration-uuid:
+        description: UUID of IPv4 expiration timer
+        type: string
       ipv6:
         description: IPv6 address
+        type: string
+      ipv6-expiration-uuid:
+        description: UUID of IPv6 expiration timer
         type: string
   Address:
     description: IP address
@@ -1453,7 +1504,10 @@ definitions:
         description: Index of network device
         type: integer
   EndpointIdentifiers:
-    description: Unique identifiers for this endpoint from outside cilium
+    description: |-
+      Unique identifiers for this endpoint from outside cilium
+
+      +deepequal-gen=true
     type: object
     properties:
       container-id:
@@ -1469,7 +1523,13 @@ definitions:
         description: Docker network ID
         type: string
       pod-name:
-        description: K8s pod for this endpoint
+        description: K8s pod for this endpoint(Deprecated, use K8sPodName and K8sNamespace instead)
+        type: string
+      k8s-pod-name:
+        description: K8s pod name for this endpoint
+        type: string
+      k8s-namespace:
+        description: K8s namespace for this endpoint
         type: string
   Labels:
     description: Set of labels
@@ -1510,7 +1570,10 @@ definitions:
         description: "Labels derived from orchestration system which have been disabled."
         "$ref": "#/definitions/Labels"
   StatusResponse:
-    description: Health and status information of daemon
+    description: |-
+      Health and status information of daemon
+
+      +k8s:deepcopy-gen=true
     type: object
     properties:
       cilium:
@@ -1522,6 +1585,9 @@ definitions:
       container-runtime:
         description: Status of local container runtime
         "$ref": "#/definitions/Status"
+      hubble:
+        description: Status of Hubble server
+        "$ref": "#/definitions/HubbleStatus"
       kubernetes:
         description: Status of Kubernetes integration
         "$ref": "#/definitions/K8sStatus"
@@ -1543,6 +1609,12 @@ definitions:
       proxy:
         description: Status of proxy
         "$ref": "#/definitions/ProxyStatus"
+      bandwidth-manager:
+        description: Status of bandwidth manager
+        "$ref": "#/definitions/BandwidthManager"
+      masquerading:
+        description: Status of masquerading
+        "$ref": "#/definitions/Masquerading"
       stale:
         description: List of stale information in the status
         type: object
@@ -1556,7 +1628,12 @@ definitions:
           client when making another request to the server.
           See for example "/cluster/nodes".
         type: integer
-
+      cluster-mesh:
+        description: Status of ClusterMesh
+        "$ref": "#/definitions/ClusterMeshStatus"
+      bpf-maps:
+        description: Status of BPF maps
+        "$ref": "#/definitions/BPFMapStatus"
   Status:
     description: Status of an individual component
     type: object
@@ -1572,8 +1649,61 @@ definitions:
       msg:
         type: string
         description: Human readable status/error/warning message
+  HubbleStatus:
+    description: |-
+      Status of the Hubble server
+
+      +k8s:deepcopy-gen=true
+    type: object
+    properties:
+      state:
+        type: string
+        description: State the component is in
+        enum:
+          - Ok
+          - Warning
+          - Failure
+          - Disabled
+      msg:
+        type: string
+        description: Human readable status/error/warning message
+      observer:
+        type: object
+        description: |-
+          Status of the Hubble observer
+
+          +k8s:deepcopy-gen=true
+        properties:
+          max-flows:
+            type: integer
+            description: Maximum number of flows this Hubble observer is able to store
+          current-flows:
+            type: integer
+            description: Current number of flows this Hubble observer stores
+          seen-flows:
+            type: integer
+            description: Total number of flows this Hubble observer has seen
+          uptime:
+            type: string
+            format: duration
+            description: Uptime of this Hubble observer instance
+      metrics:
+        type: object
+        description: Status of the Hubble metrics server
+        properties:
+          state:
+            type: string
+            description: State of the Hubble metrics
+            enum:
+              - Ok
+              - Warning
+              - Failure
+              - Disabled
   K8sStatus:
-    description: Status of Kubernetes integration
+    description: |-
+      Status of Kubernetes integration
+
+      +k8s:deepcopy-gen=true
     type: object
     properties:
       state:
@@ -1592,7 +1722,10 @@ definitions:
         type: string
         description: Human readable status/error/warning message
   KubeProxyReplacement:
-    description: Status of kube-proxy replacement
+    description: |-
+      Status of kube-proxy replacement
+
+      +k8s:deepcopy-gen=true
     type: object
     properties:
       mode:
@@ -1602,10 +1735,24 @@ definitions:
         - Strict
         - Probe
         - Partial
+      devices:
+          type: array
+          items:
+            type: string
+      directRoutingDevice:
+        type: string
       features:
+        description: |-
+
+
+          +k8s:deepcopy-gen=true
         type: object
         properties:
           nodePort:
+            description: |-
+
+
+              +k8s:deepcopy-gen=true
             type: object
             properties:
               enabled:
@@ -1615,16 +1762,47 @@ definitions:
                 enum:
                 - SNAT
                 - DSR
+                - HYBRID
+              algorithm:
+                type: string
+                enum:
+                - Random
+                - Maglev
+              acceleration:
+                type: string
+                enum:
+                - None
+                - Native
+                - Generic
               portMin:
                 type: integer
               portMax:
                 type: integer
+              lutSize:
+                type: integer
+          hostPort:
+            description: |-
+
+
+              +k8s:deepcopy-gen=true
+            type: object
+            properties:
+              enabled:
+                type: boolean
           externalIPs:
+            description: |-
+
+
+              +k8s:deepcopy-gen=true
             type: object
             properties:
               enabled:
                 type: boolean
           hostReachableServices:
+            description: |-
+
+
+              +k8s:deepcopy-gen=true
             type: object
             properties:
               enabled:
@@ -1633,6 +1811,15 @@ definitions:
                 type: array
                 items:
                   type: string
+          sessionAffinity:
+            description: |-
+
+
+              +k8s:deepcopy-gen=true
+            type: object
+            properties:
+              enabled:
+                type: boolean
   AllocationMap:
     description: |
       Map of allocated IPs
@@ -1640,7 +1827,10 @@ definitions:
     additionalProperties:
       type: string
   IPAMStatus:
-    description: Status of IP address management
+    description: |-
+      Status of IP address management
+
+      +k8s:deepcopy-gen=true
     properties:
       allocations:
         "$ref": "#/definitions/AllocationMap"
@@ -1655,7 +1845,10 @@ definitions:
       status:
         type: string
   ClusterStatus:
-    description: Status of cluster
+    description: |-
+      Status of cluster
+
+      +k8s:deepcopy-gen=true
     properties:
       ciliumHealth:
         description: Status of local cilium-health daemon
@@ -1687,6 +1880,51 @@ definitions:
       client-id:
         description: ID that should be used by the client to receive a diff from the previous request
         type: integer
+  ClusterMeshStatus:
+    description: |-
+      Status of ClusterMesh
+
+      +k8s:deepcopy-gen=true
+    properties:
+      clusters:
+        description: List of remote clusters
+        type: array
+        items:
+          "$ref": "#/definitions/RemoteCluster"
+      num-global-services:
+        description: Number of global services
+        type: integer
+  RemoteCluster:
+    description: |-
+      Status of remote cluster
+
+      +k8s:deepcopy-gen=true
+    properties:
+      name:
+        description: Name of the cluster
+        type: string
+      ready:
+        description: Indicates readiness of the remote cluser
+        type: boolean
+      num-nodes:
+        description: Number of nodes in the cluster
+        type: integer
+      num-shared-services:
+        description: Number of services in the cluster
+        type: integer
+      num-identities:
+        description: Number of identities in the cluster
+        type: integer
+      status:
+        description: Status of the control plane
+        type: string
+      num-failures:
+        description: Number of failures reaching the cluster
+        type: integer
+      last-failure:
+        description: Time of last failure that occurred while attempting to reach the cluster
+        type: string
+        format: date-time
   MonitorStatus:
     description: Status of the node monitor
     properties:
@@ -1833,7 +2071,10 @@ definitions:
     additionalProperties:
       type: string
   NodeElement:
-    description: Known node in the cluster
+    description: |-
+      Known node in the cluster
+
+      +k8s:deepcopy-gen=true
     properties:
       name:
         type: string
@@ -1852,7 +2093,10 @@ definitions:
         description: Address used for probing cluster connectivity
         "$ref": "#/definitions/NodeAddressing"
   NodeAddressing:
-    description: Addressing information of a node for all address families
+    description: |-
+      Addressing information of a node for all address families
+
+      +k8s:deepcopy-gen=true
     type: object
     properties:
       ipv6:
@@ -1896,7 +2140,10 @@ definitions:
       log:
         type: string
   Port:
-    description: Layer 4 port / protocol pair
+    description: |-
+      Layer 4 port / protocol pair
+
+      +deepequal-gen=true
     type: object
     properties:
       protocol:
@@ -1910,6 +2157,9 @@ definitions:
         description: Layer 4 port number
         type: integer
         format: uint16
+      name:
+        description: Optional layer 4 port name
+        type: string
   SelectorCache:
     description: cache of which identities match selectors in the policy repository
     type: array
@@ -1977,6 +2227,12 @@ definitions:
         - tcp
         - udp
         - any
+      scope:
+        description: Load balancing scope for frontend address
+        type: string
+        enum:
+        - external
+        - internal
       port:
         description: Layer 4 port number
         type: integer
@@ -2033,6 +2289,9 @@ definitions:
             - ClusterIP
             - NodePort
             - ExternalIPs
+            - HostPort
+            - LoadBalancer
+            - LocalRedirect
           trafficPolicy:
             description: Service traffic policy
             type: string
@@ -2056,7 +2315,10 @@ definitions:
       realized:
         "$ref": "#/definitions/ServiceSpec"
   ProxyStatus:
-    description: Status of proxy
+    description: |-
+      Status of proxy
+
+      +k8s:deepcopy-gen=true
     type: object
     properties:
       port-range:
@@ -2090,7 +2352,10 @@ definitions:
         description: Host port that this redirect points to
         type: integer
   ProxyStatistics:
-    description: Statistics of a set of proxy redirects for an endpoint
+    description: |-
+      Statistics of a set of proxy redirects for an endpoint
+
+      +k8s:deepcopy-gen=true
     type: object
     properties:
       protocol:
@@ -2112,7 +2377,10 @@ definitions:
         description: Statistics of this set of proxy redirect
         "$ref": "#/definitions/RequestResponseStatistics"
   RequestResponseStatistics:
-    description: Statistics of a proxy redirect
+    description: |-
+      Statistics of a proxy redirect
+
+      +k8s:deepcopy-gen=true
     type: object
     properties:
       requests:
@@ -2135,13 +2403,51 @@ definitions:
       forwarded:
         description: Number of messages forwarded
         type: integer
+  BandwidthManager:
+    description: |-
+      Status of bandwidth manager
+
+      +k8s:deepcopy-gen=true
+    type: object
+    properties:
+      enabled:
+        description: Is bandwidth manager enabled
+        type: boolean
+      devices:
+        type: array
+        items:
+          type: string
+  Masquerading:
+    description: |-
+      Status of masquerading
+
+      +k8s:deepcopy-gen=true
+    type: object
+    properties:
+      enabled:
+        description: Is masquerading enabled
+        type: boolean
+      mode:
+        type: string
+        enum:
+        - BPF
+        - iptables
+      ip-masq-agent:
+        description: Is BPF ip-masq-agent enabled
+        type: boolean
+      snat-exclusion-cidr:
+        description: Any packet sent to IP addr belonging to CIDR will not be SNAT'd
+        type: string
   ControllerStatuses:
     description: Collection of controller statuses
     type: array
     items:
       "$ref": "#/definitions/ControllerStatus"
   ControllerStatus:
-    description: Status of a controller
+    description: |-
+      Status of a controller
+
+      +k8s:deepcopy-gen=true
     type: object
     properties:
       name:
@@ -2152,7 +2458,11 @@ definitions:
         type: string
         format: uuid
       configuration:
-        description: Configuration of controller
+        description: |-
+          Configuration of controller
+
+          +deepequal-gen=true
+          +k8s:deepcopy-gen=true
         type: object
         properties:
           interval:
@@ -2167,7 +2477,10 @@ definitions:
             description: Retry on error
             type: boolean
       status:
-        description: Current status of controller
+        description: |-
+          Current status of controller
+
+          +k8s:deepcopy-gen=true
         type: object
         properties:
           success-count:
@@ -2212,7 +2525,7 @@ definitions:
         items:
           "$ref": "#/definitions/BPFMapEntry"
   BPFMapEntry:
-    description: BPF map cache entry"
+    description: BPF map cache entry
     type: object
     properties:
       key:
@@ -2231,6 +2544,31 @@ definitions:
       last-error:
         description: Last error seen while performing desired action
         type: string
+  BPFMapProperties:
+    description: BPF map properties
+    type: object
+    properties:
+      name:
+        description: Name of the BPF map
+        type: string
+      size:
+        description: Size of the BPF map
+        type: integer
+  BPFMapStatus:
+    description: |
+      BPF map status
+
+      +k8s:deepcopy-gen=true
+    type: object
+    properties:
+      dynamic-size-ratio:
+        description: Ratio of total system memory to use for dynamic sizing of BPF maps
+        type: number
+      maps:
+        description: BPF maps
+        type: array
+        items:
+          "$ref": "#/definitions/BPFMapProperties"
   Metric:
     description: Metric information
     type: object
@@ -2336,3 +2674,12 @@ definitions:
       name:
         description: Name assigned to the IP (e.g. Kubernetes pod name)
         type: string
+  NamedPorts:
+    description: |-
+      List of named Layer 4 port and protocol pairs which will be used in Network
+      Policy specs.
+
+      +deepequal-gen=true
+    type: array
+    items:
+      "$ref": "#/definitions/Port"

@@ -2,7 +2,7 @@
 
     WARNING: You are looking at unreleased Cilium documentation.
     Please use the official rendered version released here:
-    http://docs.cilium.io
+    https://docs.cilium.io
 
 .. _encryption:
 
@@ -12,10 +12,10 @@ Transparent Encryption (stable/beta)
 
 This guide explains how to configure Cilium to use IPsec based transparent
 encryption using Kubernetes secrets to distribute the IPsec keys. After this
-configuration is complete all traffic between Cilium
-managed endpoints, as well as Cilium managed host traffic, will be encrypted
-using IPsec. This guide uses Kubernetes secrets to distribute keys. Alternatively,
-keys may be manually distributed but that is not shown here.
+configuration is complete all traffic between Cilium-managed endpoints, as well
+as Cilium managed host traffic, will be encrypted using IPsec. This guide uses
+Kubernetes secrets to distribute keys. Alternatively, keys may be manually
+distributed, but that is not shown here.
 
 .. note::
 
@@ -23,22 +23,28 @@ keys may be manually distributed but that is not shown here.
     ENI datapath mode. In combination with encapsulation/tunneling, the feature
     is still in beta phase.
 
+.. note::
+
+    Packets destined to the same node they were sent out of are not encrypted.
+    This is a intended behavior as it doesn't provide any benefits because the
+    raw traffic on the node can be seen.
+
 Generate & import the PSK
 =========================
 
-First create a Kubernetes secret for the IPsec keys to be stored.
-This will generate the necessary IPsec keys which will be distributed as a
-Kubernetes secret called ``cilium-ipsec-keys``. In this example we use
-GMC-128-AES, but any of the supported
-Linux algorithms may be used. To generate use the following
+First, create a Kubernetes secret for the IPsec keys to be stored. This will
+generate the necessary IPsec keys which will be distributed as a Kubernetes
+secret called ``cilium-ipsec-keys``. In this example we use GMC-128-AES, but
+any of the supported Linux algorithms may be used. To generate, use the
+following:
 
 .. parsed-literal::
 
     $ kubectl create -n kube-system secret generic cilium-ipsec-keys \\
         --from-literal=keys="3 rfc4106(gcm(aes)) $(echo $(dd if=/dev/urandom count=20 bs=1 2> /dev/null| xxd -p -c 64)) 128"
 
-The secret can be displayed with ``kubectl -n kube-system get secret`` and will be
-listed as 'cilium-ipsec-keys'.
+The secret can be seen with ``kubectl -n kube-system get secret`` and will be
+listed as "cilium-ipsec-keys".
 
 .. parsed-literal::
     $ kubectl -n kube-system get secrets cilium-ipsec-keys
@@ -50,29 +56,45 @@ Enable Encryption in Cilium
 
 .. include:: k8s-install-download-release.rst
 
-Deploy Cilium release via Helm:
+Deploy Cilium release via Helm with the following options to enable encryption:
 
 .. parsed-literal::
 
     helm install cilium |CHART_RELEASE| \\
       --namespace kube-system \\
-      --set global.encryption.enabled=true \\
-      --set global.encryption.nodeEncryption=false
+      --set encryption.enabled=true \\
+      --set encryption.nodeEncryption=false
+
+These options can be provided along with other options, such as when deploying
+to GKE, with VXLAN tunneling:
+
+.. parsed-literal::
+
+    helm install cilium |CHART_RELEASE| \\
+      --namespace cilium \
+      --set nodeinit.enabled=true \
+      --set nodeinit.reconfigureKubelet=true \
+      --set nodeinit.removeCbrBridge=true \
+      --set cni.binPath=/home/kubernetes/bin \
+      --set tunnel=vxlan \
+      --set encryption.enabled=true \
+      --set encryption.nodeEncryption=false
 
 At this point the Cilium managed nodes will be using IPsec for all traffic. For further
-information on Cilium's transparent encryption, see :ref:`arch_guide`.
+information on Cilium's transparent encryption, see :ref:`ebpf_datapath`.
 
 Encryption interface
 --------------------
 
-If direct routing is being used an additional argument can be used to identify the
-network facing interface. If no interface is specified the default route link is
-chosen by inspecting the routing tables. This will work in many cases but depending
-on routing rules users may need to specify the encryption interface as follows:
+If direct routing is being used, an additional argument can be used to identify
+the network-facing interface. If no interface is specified, the default route
+link is chosen by inspecting the routing tables. This will work in many cases,
+but depending on routing rules, users may need to specify the encryption
+interface as follows:
 
 .. code:: bash
 
-    --set global.encryption.interface=ethX
+    --set encryption.interface=ethX
 
 Node to node encryption
 -----------------------
@@ -82,14 +104,14 @@ In order to enable node-to-node encryption, add:
 .. code:: bash
 
     [...]
-    --set global.encryption.enabled=true \
-    --set global.encryption.nodeEncryption=true
+    --set encryption.enabled=true \
+    --set encryption.nodeEncryption=true
 
 Validate the Setup
 ==================
 
-Run a ``bash`` shell in one of the Cilium pods with ``kubectl -n kube-system
-exec -ti cilium-7cpsm -- bash`` and execute the following commands:
+Run a ``bash`` shell in one of the Cilium pods with ``kubectl -n <k8s namespace>
+exec -ti <cilium pod> -- bash`` and execute the following commands:
 
 1. Install tcpdump
 
@@ -125,8 +147,8 @@ To replace cilium-ipsec-keys secret with a new keys,
     data=$(echo "{\"stringData\":{\"keys\":\"$((($KEYID+1))) "rfc4106\(gcm\(aes\)\)" $(echo $(dd if=/dev/urandom count=20 bs=1 2> /dev/null| xxd -p -c 64)) 128\"}}")
     kubectl patch secret -n kube-system cilium-ipsec-keys -p="${data}" -v=1
 
-Then restart cilium agents to transition to the new key. During transition the
-new and old keys will be in use. The cilium agent keeps per endpoint data on
+Then restart Cilium agents to transition to the new key. During transition the
+new and old keys will be in use. The Cilium agent keeps per endpoint data on
 which key is used by each endpoint and will use the correct key if either side
 has not yet been updated. In this way encryption will work as new keys are
 rolled out.
@@ -134,7 +156,7 @@ rolled out.
 The KEYID environment variable in the above example stores the current key ID
 used by Cilium. The key variable is a uint8 with value between 0-16 and should
 be monotonically increasing every re-key with a rollover from 16 to 0. The
-cilium agent will default to KEYID of zero if its not specified in the secret.
+Cilium agent will default to KEYID of zero if its not specified in the secret.
 
 Troubleshooting
 ===============
@@ -212,4 +234,4 @@ Disabling Encryption
 ====================
 
 To disable the encryption, regenerate the YAML with the option
-``global.encryption.enabled=false``
+``encryption.enabled=false``

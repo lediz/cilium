@@ -20,8 +20,8 @@ import (
 
 	"github.com/cilium/cilium/pkg/lock"
 
-	"github.com/cilium/proxy/go/cilium/api"
-	envoy_api_v2 "github.com/cilium/proxy/go/envoy/api/v2"
+	cilium "github.com/cilium/proxy/go/cilium/api"
+	envoy_service_disacovery "github.com/cilium/proxy/go/envoy/service/discovery/v3"
 	"github.com/golang/protobuf/proto"
 	log "github.com/sirupsen/logrus"
 )
@@ -38,7 +38,7 @@ type AccessLogger interface {
 }
 
 type PolicyUpdater interface {
-	PolicyUpdate(resp *envoy_api_v2.DiscoveryResponse) error
+	PolicyUpdate(resp *envoy_service_disacovery.DiscoveryResponse) error
 }
 
 type Instance struct {
@@ -130,7 +130,7 @@ func CloseInstance(id uint64) uint64 {
 	if ins, ok := instances[id]; ok {
 		ins.openCount--
 		count = ins.openCount
-		if count <= 0 {
+		if count == 0 {
 			if ins.policyClient != nil {
 				ins.policyClient.Close()
 			}
@@ -165,7 +165,7 @@ func (ins *Instance) PolicyMatches(endpointPolicyName string, ingress bool, port
 }
 
 // Update the PolicyMap from a protobuf. PolicyMap is only ever changed if the whole update is successful.
-func (ins *Instance) PolicyUpdate(resp *envoy_api_v2.DiscoveryResponse) (err error) {
+func (ins *Instance) PolicyUpdate(resp *envoy_service_disacovery.DiscoveryResponse) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			var ok bool

@@ -1,4 +1,4 @@
-// Copyright 2019 Authors of Cilium
+// Copyright 2019-2020 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,8 +17,11 @@ package service
 import (
 	"fmt"
 	"net"
+	"sync/atomic"
+	"time"
 
 	"github.com/cilium/cilium/pkg/bpf"
+	"github.com/cilium/cilium/pkg/cidr"
 	"github.com/cilium/cilium/pkg/counter"
 	lb "github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/lock"
@@ -26,7 +29,8 @@ import (
 	"github.com/cilium/cilium/pkg/maps/lbmap"
 	"github.com/cilium/cilium/pkg/metrics"
 	monitorAPI "github.com/cilium/cilium/pkg/monitor/api"
-	"github.com/cilium/cilium/pkg/node"
+	nodeTypes "github.com/cilium/cilium/pkg/node/types"
+	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/service/healthserver"
 
 	"github.com/sirupsen/logrus"
@@ -40,12 +44,17 @@ var (
 
 // LBMap is the interface describing methods for manipulating service maps.
 type LBMap interface {
-	UpsertService(uint16, net.IP, uint16, []uint16, int, bool, lb.SVCType, bool) error
-	DeleteService(lb.L3n4AddrID, int) error
+	UpsertService(*lbmap.UpsertServiceParams) error
+	DeleteService(lb.L3n4AddrID, int, bool) error
 	AddBackend(uint16, net.IP, uint16, bool) error
 	DeleteBackendByID(uint16, bool) error
+	AddAffinityMatch(uint16, uint16) error
+	DeleteAffinityMatch(uint16, uint16) error
+	UpdateSourceRanges(uint16, []*cidr.CIDR, []*cidr.CIDR, bool) error
 	DumpServiceMaps() ([]*lb.SVC, []error)
 	DumpBackendMaps() ([]*lb.Backend, error)
+	DumpAffinityMatches() (lbmap.BackendIDByServiceIDSet, error)
+	DumpSourceRanges(bool) (lbmap.SourceRangeSetByServiceID, error)
 }
 
 // healthServer is used to manage HealtCheckNodePort listeners
@@ -56,7 +65,7 @@ type healthServer interface {
 
 // monitorNotify is used to send update notifications to the monitor
 type monitorNotify interface {
-	SendNotification(typ monitorAPI.AgentNotification, text string) error
+	SendNotification(msg monitorAPI.AgentNotifyMessage) error
 }
 
 type svcInfo struct {
@@ -65,11 +74,15 @@ type svcInfo struct {
 	backends      []lb.Backend
 	backendByHash map[string]*lb.Backend
 
-	svcType                lb.SVCType
-	svcTrafficPolicy       lb.SVCTrafficPolicy
-	svcHealthCheckNodePort uint16
-	svcName                string
-	svcNamespace           string
+	svcType                   lb.SVCType
+	svcTrafficPolicy          lb.SVCTrafficPolicy
+	sessionAffinity           bool
+	sessionAffinityTimeoutSec uint32
+	svcHealthCheckNodePort    uint16
+	svcName                   string
+	svcNamespace              string
+	loadBalancerSourceRanges  []*cidr.CIDR
+	maglev                    bool
 
 	restoredFromDatapath bool
 }
@@ -80,21 +93,30 @@ func (svc *svcInfo) deepCopyToLBSVC() *lb.SVC {
 		backends[i] = *backend.DeepCopy()
 	}
 	return &lb.SVC{
-		Frontend:      *svc.frontend.DeepCopy(),
-		Backends:      backends,
-		Type:          svc.svcType,
-		TrafficPolicy: svc.svcTrafficPolicy,
-		Name:          svc.svcName,
-		Namespace:     svc.svcNamespace,
+		Frontend:            *svc.frontend.DeepCopy(),
+		Backends:            backends,
+		Type:                svc.svcType,
+		TrafficPolicy:       svc.svcTrafficPolicy,
+		HealthCheckNodePort: svc.svcHealthCheckNodePort,
+		Name:                svc.svcName,
+		Namespace:           svc.svcNamespace,
 	}
 }
 
-func (svc *svcInfo) requireNodeLocalBackends() bool {
+// requireNodeLocalBackends returns true if the frontend service traffic policy
+// is lb.SVCTrafficPolicyLocal and whether only local backends need to be filtered for the
+// given frontend.
+func (svc *svcInfo) requireNodeLocalBackends(frontend lb.L3n4AddrID) (bool, bool) {
 	switch svc.svcType {
+	case lb.SVCTypeLocalRedirect:
+		return false, true
 	case lb.SVCTypeNodePort, lb.SVCTypeLoadBalancer, lb.SVCTypeExternalIPs:
-		return svc.svcTrafficPolicy == lb.SVCTrafficPolicyLocal
+		if svc.svcTrafficPolicy == lb.SVCTrafficPolicyLocal {
+			return true, frontend.Scope == lb.ScopeExternal
+		}
+		fallthrough
 	default:
-		return false
+		return false, false
 	}
 }
 
@@ -114,26 +136,52 @@ type Service struct {
 	healthServer  healthServer
 	monitorNotify monitorNotify
 
-	lbmap LBMap
+	lbmap         LBMap
+	lastUpdatedTs atomic.Value
 }
 
 // NewService creates a new instance of the service handler.
 func NewService(monitorNotify monitorNotify) *Service {
-	return &Service{
+
+	var localHealthServer healthServer
+	if option.Config.EnableHealthCheckNodePort {
+		localHealthServer = healthserver.New()
+	}
+
+	maglev := option.Config.NodePortAlg == option.NodePortAlgMaglev
+	maglevTableSize := option.Config.MaglevTableSize
+
+	svc := &Service{
 		svcByHash:       map[string]*svcInfo{},
 		svcByID:         map[lb.ID]*svcInfo{},
 		backendRefCount: counter.StringCounter{},
 		backendByHash:   map[string]*lb.Backend{},
 		monitorNotify:   monitorNotify,
-		healthServer:    healthserver.New(),
-		lbmap:           &lbmap.LBBPFMap{},
+		healthServer:    localHealthServer,
+		lbmap:           lbmap.New(maglev, maglevTableSize),
 	}
+	svc.lastUpdatedTs.Store(time.Now())
+	return svc
+}
+
+func (s *Service) GetLastUpdatedTs() time.Time {
+	if val := s.lastUpdatedTs.Load(); val != nil {
+		ts, ok := val.(time.Time)
+		if ok {
+			return ts
+		}
+	}
+	return time.Now()
+}
+
+func (s *Service) GetCurrentTs() time.Time {
+	return time.Now()
 }
 
 // InitMaps opens or creates BPF maps used by services.
 //
 // If restore is set to false, entries of the maps are removed.
-func (s *Service) InitMaps(ipv6, ipv4, restore bool) error {
+func (s *Service) InitMaps(ipv6, ipv4, sockMaps, restore bool) error {
 	s.Lock()
 	defer s.Unlock()
 
@@ -152,11 +200,21 @@ func (s *Service) InitMaps(ipv6, ipv4, restore bool) error {
 		if !restore {
 			toDelete = append(toDelete, lbmap.Service6MapV2, lbmap.Backend6Map, lbmap.RevNat6Map)
 		}
+		if sockMaps {
+			if err := lbmap.CreateSockRevNat6Map(); err != nil {
+				return err
+			}
+		}
 	}
 	if ipv4 {
 		toOpen = append(toOpen, lbmap.Service4MapV2, lbmap.Backend4Map, lbmap.RevNat4Map)
 		if !restore {
 			toDelete = append(toDelete, lbmap.Service4MapV2, lbmap.Backend4Map, lbmap.RevNat4Map)
+		}
+		if sockMaps {
+			if err := lbmap.CreateSockRevNat4Map(); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -177,29 +235,36 @@ func (s *Service) InitMaps(ipv6, ipv4, restore bool) error {
 // UpsertService inserts or updates the given service.
 //
 // The first return value is true if the service hasn't existed before.
-func (s *Service) UpsertService(
-	frontend lb.L3n4AddrID, backends []lb.Backend, svcType lb.SVCType,
-	svcTrafficPolicy lb.SVCTrafficPolicy, svcHealthCheckNodePort uint16,
-	svcName, svcNamespace string) (bool, lb.ID, error) {
-
+func (s *Service) UpsertService(params *lb.SVC) (bool, lb.ID, error) {
 	s.Lock()
 	defer s.Unlock()
 
 	scopedLog := log.WithFields(logrus.Fields{
-		logfields.ServiceIP: frontend.L3n4Addr,
-		logfields.Backends:  backends,
+		logfields.ServiceIP: params.Frontend.L3n4Addr,
+		logfields.Backends:  params.Backends,
 
-		logfields.ServiceType:                svcType,
-		logfields.ServiceTrafficPolicy:       svcTrafficPolicy,
-		logfields.ServiceHealthCheckNodePort: svcHealthCheckNodePort,
-		logfields.ServiceName:                svcName,
-		logfields.ServiceNamespace:           svcNamespace,
+		logfields.ServiceType:                params.Type,
+		logfields.ServiceTrafficPolicy:       params.TrafficPolicy,
+		logfields.ServiceHealthCheckNodePort: params.HealthCheckNodePort,
+		logfields.ServiceName:                params.Name,
+		logfields.ServiceNamespace:           params.Namespace,
+
+		logfields.SessionAffinity:        params.SessionAffinity,
+		logfields.SessionAffinityTimeout: params.SessionAffinityTimeoutSec,
+
+		logfields.LoadBalancerSourceRanges: params.LoadBalancerSourceRanges,
 	})
 	scopedLog.Debug("Upserting service")
 
+	if !option.Config.EnableSVCSourceRangeCheck &&
+		len(params.LoadBalancerSourceRanges) != 0 {
+		scopedLog.Warnf("--%s is disabled, ignoring loadBalancerSourceRanges",
+			option.EnableSVCSourceRangeCheck)
+	}
+
 	// If needed, create svcInfo and allocate service ID
-	svc, new, err := s.createSVCInfoIfNotExist(frontend, svcType, svcTrafficPolicy,
-		svcHealthCheckNodePort, svcName, svcNamespace)
+	svc, new, prevSessionAffinity, prevLoadBalancerSourceRanges, err :=
+		s.createSVCInfoIfNotExist(params)
 	if err != nil {
 		return false, lb.ID(0), err
 	}
@@ -207,35 +272,54 @@ func (s *Service) UpsertService(
 	scopedLog = scopedLog.WithField(logfields.ServiceID, svc.frontend.ID)
 	scopedLog.Debug("Acquired service ID")
 
-	onlyLocalBackends := svc.requireNodeLocalBackends()
+	onlyLocalBackends, filterBackends := svc.requireNodeLocalBackends(params.Frontend)
 	prevBackendCount := len(svc.backends)
 
 	backendsCopy := []lb.Backend{}
-	for _, b := range backends {
-		// Services with trafficPolicy=Local may only use node-local backends.
-		// We implement this by filtering out all backend IPs which are not a
-		// local endpoint.
-		if onlyLocalBackends && len(b.NodeName) > 0 && b.NodeName != node.GetName() {
+	for _, b := range params.Backends {
+		// Local redirect services or services with trafficPolicy=Local may
+		// only use node-local backends for external scope. We implement this by
+		// filtering out all backend IPs which are not a local endpoint.
+		if filterBackends && len(b.NodeName) > 0 && b.NodeName != nodeTypes.GetName() {
 			continue
 		}
 		backendsCopy = append(backendsCopy, *b.DeepCopy())
 	}
 
+	// TODO (Aditi) When we filter backends for LocalRedirect service, there
+	// might be some backend pods with active connections. We may need to
+	// defer filtering the backends list (thereby defer redirecting traffic)
+	// in such cases. GH #12859
 	// Update backends cache and allocate/release backend IDs
-	newBackends, obsoleteBackendIDs, err := s.updateBackendsCacheLocked(svc, backendsCopy)
+	newBackends, obsoleteBackendIDs, obsoleteSVCBackendIDs, err :=
+		s.updateBackendsCacheLocked(svc, backendsCopy)
 	if err != nil {
 		return false, lb.ID(0), err
 	}
 
 	// Update lbmaps (BPF service maps)
-	if err = s.upsertServiceIntoLBMaps(svc, prevBackendCount, newBackends,
-		obsoleteBackendIDs, scopedLog); err != nil {
+	if err = s.upsertServiceIntoLBMaps(svc, onlyLocalBackends, prevBackendCount, newBackends,
+		obsoleteBackendIDs, prevSessionAffinity,
+		prevLoadBalancerSourceRanges, obsoleteSVCBackendIDs,
+		scopedLog); err != nil {
+
 		return false, lb.ID(0), err
 	}
 
-	localBackendCount := len(backendsCopy)
-	s.healthServer.UpsertService(lb.ID(svc.frontend.ID), svc.svcNamespace, svc.svcName,
-		localBackendCount, svc.svcHealthCheckNodePort)
+	// Only add a HealthCheckNodePort server if this is a service which may
+	// only contain local backends (i.e. it has externalTrafficPolicy=Local)
+	if option.Config.EnableHealthCheckNodePort {
+		if onlyLocalBackends && filterBackends {
+			localBackendCount := len(backendsCopy)
+			s.healthServer.UpsertService(lb.ID(svc.frontend.ID), svc.svcNamespace, svc.svcName,
+				localBackendCount, svc.svcHealthCheckNodePort)
+		} else if svc.svcHealthCheckNodePort == 0 {
+			// Remove the health check server in case this service used to have
+			// externalTrafficPolicy=Local with HealthCheckNodePort in the previous
+			// version, but not anymore.
+			s.healthServer.DeleteService(lb.ID(svc.frontend.ID))
+		}
+	}
 
 	if new {
 		addMetric.Inc()
@@ -245,7 +329,6 @@ func (s *Service) UpsertService(
 
 	s.notifyMonitorServiceUpsert(svc.frontend, svc.backends,
 		svc.svcType, svc.svcTrafficPolicy, svc.svcName, svc.svcNamespace)
-
 	return new, lb.ID(svc.frontend.ID), nil
 }
 
@@ -320,10 +403,96 @@ func (s *Service) RestoreServices() error {
 		return err
 	}
 
+	// Remove no longer existing affinity matches
+	if option.Config.EnableSessionAffinity {
+		if err := s.deleteOrphanAffinityMatchesLocked(); err != nil {
+			return err
+		}
+	}
+
+	// Remove LB source ranges for no longer existing services
+	if option.Config.EnableSVCSourceRangeCheck {
+		if err := s.restoreAndDeleteOrphanSourceRanges(); err != nil {
+			return err
+		}
+	}
+
 	// Remove obsolete backends and release their IDs
 	if err := s.deleteOrphanBackends(); err != nil {
 		log.WithError(err).Warn("Failed to remove orphan backends")
 
+	}
+
+	return nil
+}
+
+// deleteOrphanAffinityMatchesLocked removes affinity matches which point to
+// non-existent svc ID and backend ID tuples.
+func (s *Service) deleteOrphanAffinityMatchesLocked() error {
+	matches, err := s.lbmap.DumpAffinityMatches()
+	if err != nil {
+		return err
+	}
+
+	toRemove := map[lb.ID][]lb.BackendID{}
+
+	local := make(map[lb.ID]map[lb.BackendID]struct{}, len(s.svcByID))
+	for id, svc := range s.svcByID {
+		if !svc.sessionAffinity {
+			continue
+		}
+		local[id] = make(map[lb.BackendID]struct{}, len(svc.backends))
+		for _, backend := range svc.backends {
+			local[id][backend.ID] = struct{}{}
+		}
+	}
+
+	for svcID, backendIDs := range matches {
+		for bID := range backendIDs {
+			found := false
+			if _, ok := local[lb.ID(svcID)]; ok {
+				if _, ok := local[lb.ID(svcID)][lb.BackendID(bID)]; ok {
+					found = true
+				}
+			}
+			if !found {
+				toRemove[lb.ID(svcID)] = append(toRemove[lb.ID(svcID)], lb.BackendID(bID))
+			}
+		}
+	}
+
+	for svcID, backendIDs := range toRemove {
+		s.deleteBackendsFromAffinityMatchMap(svcID, backendIDs)
+	}
+
+	return nil
+}
+
+func (s *Service) restoreAndDeleteOrphanSourceRanges() error {
+	opts := []bool{}
+	if option.Config.EnableIPv4 {
+		opts = append(opts, false)
+	}
+	if option.Config.EnableIPv6 {
+		opts = append(opts, true)
+	}
+
+	for _, ipv6 := range opts {
+		srcRangesBySvcID, err := s.lbmap.DumpSourceRanges(ipv6)
+		if err != nil {
+			return err
+		}
+		for svcID, srcRanges := range srcRangesBySvcID {
+			svc, found := s.svcByID[lb.ID(svcID)]
+			if !found {
+				// Delete ranges
+				if err := s.lbmap.UpdateSourceRanges(svcID, srcRanges, nil, ipv6); err != nil {
+					return err
+				}
+			} else {
+				svc.loadBalancerSourceRanges = srcRanges
+			}
+		}
 	}
 
 	return nil
@@ -354,52 +523,76 @@ func (s *Service) SyncWithK8sFinished() error {
 	return nil
 }
 
-func (s *Service) createSVCInfoIfNotExist(
-	frontend lb.L3n4AddrID,
-	svcType lb.SVCType,
-	svcTrafficPolicy lb.SVCTrafficPolicy,
-	svcHealthCheckNodePort uint16,
-	svcName, svcNamespace string,
-) (*svcInfo, bool, error) {
+func (s *Service) createSVCInfoIfNotExist(p *lb.SVC) (*svcInfo, bool, bool,
+	[]*cidr.CIDR, error) {
 
-	hash := frontend.Hash()
+	prevSessionAffinity := false
+	prevLoadBalancerSourceRanges := []*cidr.CIDR{}
+
+	hash := p.Frontend.Hash()
 	svc, found := s.svcByHash[hash]
 	if !found {
 		// Allocate service ID for the new service
-		addrID, err := AcquireID(frontend.L3n4Addr, uint32(frontend.ID))
+		addrID, err := AcquireID(p.Frontend.L3n4Addr, uint32(p.Frontend.ID))
 		if err != nil {
-			return nil, false,
+			return nil, false, false, nil,
 				fmt.Errorf("Unable to allocate service ID %d for %v: %s",
-					frontend.ID, frontend, err)
+					p.Frontend.ID, p.Frontend, err)
 		}
-		frontend.ID = addrID.ID
+		p.Frontend.ID = addrID.ID
 
 		svc = &svcInfo{
 			hash:          hash,
-			frontend:      frontend,
+			frontend:      p.Frontend,
 			backendByHash: map[string]*lb.Backend{},
 
-			svcType:      svcType,
-			svcName:      svcName,
-			svcNamespace: svcNamespace,
+			svcType:      p.Type,
+			svcName:      p.Name,
+			svcNamespace: p.Namespace,
 
-			svcTrafficPolicy:       svcTrafficPolicy,
-			svcHealthCheckNodePort: svcHealthCheckNodePort,
+			sessionAffinity:           p.SessionAffinity,
+			sessionAffinityTimeoutSec: p.SessionAffinityTimeoutSec,
+
+			svcTrafficPolicy:         p.TrafficPolicy,
+			svcHealthCheckNodePort:   p.HealthCheckNodePort,
+			loadBalancerSourceRanges: p.LoadBalancerSourceRanges,
 		}
-		s.svcByID[frontend.ID] = svc
+		s.svcByID[p.Frontend.ID] = svc
 		s.svcByHash[hash] = svc
 	} else {
-		svc.svcType = svcType
-		svc.svcTrafficPolicy = svcTrafficPolicy
-		svc.svcHealthCheckNodePort = svcHealthCheckNodePort
+		// Local Redirect Policies with service matcher would have same frontend
+		// as the service clusterIP type. In such cases, if a Local redirect service
+		// exists, we shouldn't override it with clusterIP type (e.g., k8s event/sync, etc).
+		if svc.svcType == lb.SVCTypeLocalRedirect && p.Type == lb.SVCTypeClusterIP {
+			err := fmt.Errorf("local-redirect service exists for "+
+				"frontend %v, skip update for svc %v", p.Frontend, p.Name)
+			return svc, !found, prevSessionAffinity, prevLoadBalancerSourceRanges, err
+
+		}
+		// Local-redirect service can only override clusterIP service type or itself.
+		if p.Type == lb.SVCTypeLocalRedirect &&
+			(svc.svcType != lb.SVCTypeClusterIP && svc.svcType != lb.SVCTypeLocalRedirect) {
+			err := fmt.Errorf("skip local-redirect service for "+
+				"frontend %v as it overlaps with svc %v of type %v",
+				p.Frontend, svc.svcName, svc.svcType)
+			return svc, !found, prevSessionAffinity, prevLoadBalancerSourceRanges, err
+		}
+		prevSessionAffinity = svc.sessionAffinity
+		prevLoadBalancerSourceRanges = svc.loadBalancerSourceRanges
+		svc.svcType = p.Type
+		svc.svcTrafficPolicy = p.TrafficPolicy
+		svc.svcHealthCheckNodePort = p.HealthCheckNodePort
+		svc.sessionAffinity = p.SessionAffinity
+		svc.sessionAffinityTimeoutSec = p.SessionAffinityTimeoutSec
+		svc.loadBalancerSourceRanges = p.LoadBalancerSourceRanges
 		// Name and namespace are both optional and intended for exposure via
 		// API. They they are not part of any BPF maps and cannot be restored
 		// from datapath.
-		if svcName != "" {
-			svc.svcName = svcName
+		if p.Name != "" {
+			svc.svcName = p.Name
 		}
-		if svcNamespace != "" {
-			svc.svcNamespace = svcNamespace
+		if p.Namespace != "" {
+			svc.svcNamespace = p.Namespace
 		}
 		// We have heard about the service from k8s, so unset the flag so that
 		// SyncWithK8sFinished() won't consider the service obsolete, and thus
@@ -407,14 +600,99 @@ func (s *Service) createSVCInfoIfNotExist(
 		svc.restoredFromDatapath = false
 	}
 
-	return svc, !found, nil
+	svc.maglev = option.Config.NodePortAlg == option.NodePortAlgMaglev &&
+		((p.Type == lb.SVCTypeNodePort && !isWildcardAddr(svc.frontend)) ||
+			p.Type == lb.SVCTypeExternalIPs ||
+			p.Type == lb.SVCTypeLoadBalancer)
+
+	return svc, !found, prevSessionAffinity, prevLoadBalancerSourceRanges, nil
 }
 
-func (s *Service) upsertServiceIntoLBMaps(svc *svcInfo, prevBackendCount int,
-	newBackends []lb.Backend, obsoleteBackendIDs []lb.BackendID,
-	scopedLog *logrus.Entry) error {
+func (s *Service) deleteBackendsFromAffinityMatchMap(svcID lb.ID, backendIDs []lb.BackendID) {
+	log.WithFields(logrus.Fields{
+		logfields.Backends:  backendIDs,
+		logfields.ServiceID: svcID,
+	}).Debug("Deleting backends from session affinity match")
+
+	for _, bID := range backendIDs {
+		if err := s.lbmap.DeleteAffinityMatch(uint16(svcID), uint16(bID)); err != nil {
+			log.WithFields(logrus.Fields{
+				logfields.BackendID: bID,
+				logfields.ServiceID: svcID,
+			}).WithError(err).Warn("Unable to remove entry from affinity match map")
+		}
+	}
+}
+
+func (s *Service) addBackendsToAffinityMatchMap(svcID lb.ID, backendIDs []lb.BackendID) {
+	log.WithFields(logrus.Fields{
+		logfields.Backends:  backendIDs,
+		logfields.ServiceID: svcID,
+	}).Debug("Adding backends to affinity match map")
+
+	for _, bID := range backendIDs {
+		if err := s.lbmap.AddAffinityMatch(uint16(svcID), uint16(bID)); err != nil {
+			log.WithFields(logrus.Fields{
+				logfields.BackendID: bID,
+				logfields.ServiceID: svcID,
+			}).WithError(err).Warn("Unable to add entry to affinity match map")
+		}
+	}
+}
+
+func (s *Service) upsertServiceIntoLBMaps(svc *svcInfo, onlyLocalBackends bool,
+	prevBackendCount int, newBackends []lb.Backend, obsoleteBackendIDs []lb.BackendID,
+	prevSessionAffinity bool, prevLoadBalancerSourceRanges []*cidr.CIDR,
+	obsoleteSVCBackendIDs []lb.BackendID, scopedLog *logrus.Entry) error {
 
 	ipv6 := svc.frontend.IsIPv6()
+
+	var (
+		toDeleteAffinity, toAddAffinity []lb.BackendID
+		checkLBSrcRange                 bool
+	)
+
+	// Update sessionAffinity
+	if option.Config.EnableSessionAffinity {
+		if prevSessionAffinity && !svc.sessionAffinity {
+			// Remove backends from the affinity match because the svc's sessionAffinity
+			// has been disabled
+			toDeleteAffinity = make([]lb.BackendID, 0, len(obsoleteSVCBackendIDs)+len(svc.backends))
+			toDeleteAffinity = append(toDeleteAffinity, obsoleteSVCBackendIDs...)
+			for _, b := range svc.backends {
+				toDeleteAffinity = append(toDeleteAffinity, b.ID)
+			}
+		} else if svc.sessionAffinity {
+			toAddAffinity = make([]lb.BackendID, 0, len(svc.backends))
+			for _, b := range svc.backends {
+				toAddAffinity = append(toAddAffinity, b.ID)
+			}
+			if prevSessionAffinity {
+				// Remove obsolete svc backends if previously the svc had the affinity enabled
+				toDeleteAffinity = make([]lb.BackendID, 0, len(obsoleteSVCBackendIDs))
+				for _, bID := range obsoleteSVCBackendIDs {
+					toDeleteAffinity = append(toDeleteAffinity, bID)
+				}
+			}
+		}
+
+		s.deleteBackendsFromAffinityMatchMap(svc.frontend.ID, toDeleteAffinity)
+		// New affinity matches (toAddAffinity) will be added after the new
+		// backends have been added.
+	}
+
+	// Update LB source range check cidrs
+	if option.Config.EnableSVCSourceRangeCheck {
+		checkLBSrcRange = len(svc.loadBalancerSourceRanges) != 0
+		if checkLBSrcRange || len(prevLoadBalancerSourceRanges) != 0 {
+			if err := s.lbmap.UpdateSourceRanges(uint16(svc.frontend.ID),
+				prevLoadBalancerSourceRanges, svc.loadBalancerSourceRanges,
+				ipv6); err != nil {
+
+				return err
+			}
+		}
+	}
 
 	// Add new backends into BPF maps
 	for _, b := range newBackends {
@@ -430,26 +708,32 @@ func (s *Service) upsertServiceIntoLBMaps(svc *svcInfo, prevBackendCount int,
 	}
 
 	// Upsert service entries into BPF maps
-	backendIDs := make([]uint16, len(svc.backends))
-	for i, b := range svc.backends {
-		backendIDs[i] = uint16(b.ID)
+	backends := make(map[string]uint16, len(svc.backends))
+	for _, b := range svc.backends {
+		backends[b.String()] = uint16(b.ID)
 	}
 
-	svcType := svc.svcType
-	// SVC of LoadBalancer type is identical to ExternalIP. However, currently
-	// datapath does not support the LoadBalancer type, only ExternalIP. So,
-	// for now set the ExternalIP type.
-	if svcType == lb.SVCTypeLoadBalancer {
-		svcType = lb.SVCTypeExternalIPs
+	p := &lbmap.UpsertServiceParams{
+		ID:                        uint16(svc.frontend.ID),
+		IP:                        svc.frontend.L3n4Addr.IP,
+		Port:                      svc.frontend.L3n4Addr.L4Addr.Port,
+		Backends:                  backends,
+		PrevBackendCount:          prevBackendCount,
+		IPv6:                      ipv6,
+		Type:                      svc.svcType,
+		Local:                     onlyLocalBackends,
+		Scope:                     svc.frontend.L3n4Addr.Scope,
+		SessionAffinity:           svc.sessionAffinity,
+		SessionAffinityTimeoutSec: svc.sessionAffinityTimeoutSec,
+		CheckSourceRange:          checkLBSrcRange,
+		UseMaglev:                 svc.maglev,
 	}
-
-	err := s.lbmap.UpsertService(
-		uint16(svc.frontend.ID), svc.frontend.L3n4Addr.IP,
-		svc.frontend.L3n4Addr.L4Addr.Port,
-		backendIDs, prevBackendCount,
-		ipv6, svcType, svc.requireNodeLocalBackends())
-	if err != nil {
+	if err := s.lbmap.UpsertService(p); err != nil {
 		return err
+	}
+
+	if option.Config.EnableSessionAffinity {
+		s.addBackendsToAffinityMatchMap(svc.frontend.ID, toAddAffinity)
 	}
 
 	// Remove backends not used by any service from BPF maps
@@ -535,6 +819,10 @@ func (s *Service) restoreServicesLocked() error {
 			// service cache has been initialized
 			svcType:          svc.Type,
 			svcTrafficPolicy: svc.TrafficPolicy,
+
+			sessionAffinity:           svc.SessionAffinity,
+			sessionAffinityTimeoutSec: svc.SessionAffinityTimeoutSec,
+
 			// Indicate that the svc was restored from the BPF maps, so that
 			// SyncWithK8sFinished() could remove services which were restored
 			// from the maps but not present in the k8sServiceCache (e.g. a svc
@@ -562,6 +850,7 @@ func (s *Service) restoreServicesLocked() error {
 }
 
 func (s *Service) deleteServiceLocked(svc *svcInfo) error {
+	ipv6 := svc.frontend.L3n4Addr.IsIPv6()
 	obsoleteBackendIDs := s.deleteBackendsFromCacheLocked(svc)
 
 	scopedLog := log.WithFields(logrus.Fields{
@@ -571,14 +860,30 @@ func (s *Service) deleteServiceLocked(svc *svcInfo) error {
 	})
 	scopedLog.Debug("Deleting service")
 
-	if err := s.lbmap.DeleteService(svc.frontend, len(svc.backends)); err != nil {
+	if err := s.lbmap.DeleteService(svc.frontend, len(svc.backends), svc.maglev); err != nil {
 		return err
+	}
+
+	// Delete affinity matches
+	if option.Config.EnableSessionAffinity && svc.sessionAffinity {
+		backendIDs := make([]lb.BackendID, 0, len(svc.backends))
+		for _, b := range svc.backends {
+			backendIDs = append(backendIDs, b.ID)
+		}
+		s.deleteBackendsFromAffinityMatchMap(svc.frontend.ID, backendIDs)
+	}
+
+	if option.Config.EnableSVCSourceRangeCheck &&
+		svc.svcType == lb.SVCTypeLoadBalancer {
+		if err := s.lbmap.UpdateSourceRanges(uint16(svc.frontend.ID),
+			svc.loadBalancerSourceRanges, nil, ipv6); err != nil {
+			return err
+		}
 	}
 
 	delete(s.svcByHash, svc.hash)
 	delete(s.svcByID, svc.frontend.ID)
 
-	ipv6 := svc.frontend.L3n4Addr.IsIPv6()
 	for _, id := range obsoleteBackendIDs {
 		scopedLog.WithField(logfields.BackendID, id).
 			Debug("Deleting obsolete backend")
@@ -591,7 +896,9 @@ func (s *Service) deleteServiceLocked(svc *svcInfo) error {
 		return fmt.Errorf("Unable to release service ID %d: %s", svc.frontend.ID, err)
 	}
 
-	s.healthServer.DeleteService(lb.ID(svc.frontend.ID))
+	if option.Config.EnableHealthCheckNodePort {
+		s.healthServer.DeleteService(lb.ID(svc.frontend.ID))
+	}
 
 	deleteMetric.Inc()
 	s.notifyMonitorServiceDelete(svc.frontend.ID)
@@ -600,10 +907,11 @@ func (s *Service) deleteServiceLocked(svc *svcInfo) error {
 }
 
 func (s *Service) updateBackendsCacheLocked(svc *svcInfo, backends []lb.Backend) (
-	[]lb.Backend, []lb.BackendID, error) {
+	[]lb.Backend, []lb.BackendID, []lb.BackendID, error) {
 
-	obsoleteBackendIDs := []lb.BackendID{}
-	newBackends := []lb.Backend{}
+	obsoleteBackendIDs := []lb.BackendID{}    // not used by any svc
+	obsoleteSVCBackendIDs := []lb.BackendID{} // removed from the svc, but might be used by other svc
+	newBackends := []lb.Backend{}             // previously not used by any svc
 	backendSet := map[string]struct{}{}
 
 	for i, backend := range backends {
@@ -614,7 +922,7 @@ func (s *Service) updateBackendsCacheLocked(svc *svcInfo, backends []lb.Backend)
 			if s.backendRefCount.Add(hash) {
 				id, err := AcquireBackendID(backend.L3n4Addr)
 				if err != nil {
-					return nil, nil, fmt.Errorf("Unable to acquire backend ID for %q: %s",
+					return nil, nil, nil, fmt.Errorf("Unable to acquire backend ID for %q: %s",
 						backend.L3n4Addr, err)
 				}
 				backends[i].ID = id
@@ -632,18 +940,18 @@ func (s *Service) updateBackendsCacheLocked(svc *svcInfo, backends []lb.Backend)
 
 	for hash, backend := range svc.backendByHash {
 		if _, found := backendSet[hash]; !found {
+			obsoleteSVCBackendIDs = append(obsoleteSVCBackendIDs, backend.ID)
 			if s.backendRefCount.Delete(hash) {
 				DeleteBackendID(backend.ID)
 				delete(s.backendByHash, hash)
 				obsoleteBackendIDs = append(obsoleteBackendIDs, backend.ID)
 			}
-
 			delete(svc.backendByHash, hash)
 		}
 	}
 
 	svc.backends = backends
-	return newBackends, obsoleteBackendIDs, nil
+	return newBackends, obsoleteBackendIDs, obsoleteSVCBackendIDs, nil
 }
 
 func (s *Service) deleteBackendsFromCacheLocked(svc *svcInfo) []lb.BackendID {
@@ -680,16 +988,35 @@ func (s *Service) notifyMonitorServiceUpsert(frontend lb.L3n4AddrID, backends []
 		be = append(be, b)
 	}
 
-	repr, err := monitorAPI.ServiceUpsertRepr(id, fe, be, string(svcType), string(svcTrafficPolicy), svcName, svcNamespace)
-	if err == nil {
-		s.monitorNotify.SendNotification(monitorAPI.AgentNotifyServiceUpserted, repr)
-	}
+	msg := monitorAPI.ServiceUpsertMessage(id, fe, be, string(svcType), string(svcTrafficPolicy), svcName, svcNamespace)
+	s.monitorNotify.SendNotification(msg)
 }
 
 func (s *Service) notifyMonitorServiceDelete(id lb.ID) {
 	if s.monitorNotify != nil {
-		if repr, err := monitorAPI.ServiceDeleteRepr(uint32(id)); err == nil {
-			s.monitorNotify.SendNotification(monitorAPI.AgentNotifyServiceDeleted, repr)
-		}
+		s.monitorNotify.SendNotification(monitorAPI.ServiceDeleteMessage(uint32(id)))
 	}
+}
+
+// GetServiceNameByAddr returns namespace and name of the service with a given L3n4Addr. The third
+// return value is set to true if and only if the service is found in the map.
+func (s *Service) GetServiceNameByAddr(addr lb.L3n4Addr) (string, string, bool) {
+	s.RLock()
+	defer s.RUnlock()
+
+	svc, found := s.svcByHash[addr.Hash()]
+	if !found {
+		return "", "", false
+	}
+
+	return svc.svcNamespace, svc.svcName, true
+}
+
+// isWildcardAddr returns true if given frontend is used for wildcard svc lookups
+// (by bpf_sock).
+func isWildcardAddr(frontend lb.L3n4AddrID) bool {
+	if frontend.IsIPv6() {
+		return net.IPv6zero.Equal(frontend.IP)
+	}
+	return net.IPv4zero.Equal(frontend.IP)
 }

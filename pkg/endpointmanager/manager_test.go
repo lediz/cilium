@@ -22,13 +22,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cilium/cilium/common/addressing"
+	"github.com/cilium/cilium/pkg/addressing"
 	"github.com/cilium/cilium/pkg/checker"
 	"github.com/cilium/cilium/pkg/completion"
 	"github.com/cilium/cilium/pkg/datapath"
 	"github.com/cilium/cilium/pkg/endpoint"
 	endpointid "github.com/cilium/cilium/pkg/endpoint/id"
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
+	"github.com/cilium/cilium/pkg/fqdn/restore"
 	"github.com/cilium/cilium/pkg/lock"
 	monitorAPI "github.com/cilium/cilium/pkg/monitor/api"
 	"github.com/cilium/cilium/pkg/option"
@@ -79,12 +80,23 @@ func (s *EndpointManagerSuite) GetCompilationLock() *lock.RWMutex {
 	return nil
 }
 
-func (s *EndpointManagerSuite) SendNotification(typ monitorAPI.AgentNotification, text string) error {
+func (s *EndpointManagerSuite) GetCIDRPrefixLengths() (s6, s4 []int) {
+	return nil, nil
+}
+
+func (s *EndpointManagerSuite) SendNotification(msg monitorAPI.AgentNotifyMessage) error {
 	return nil
 }
 
 func (s *EndpointManagerSuite) Datapath() datapath.Datapath {
 	return nil
+}
+
+func (s *EndpointManagerSuite) GetDNSRules(epID uint16) restore.DNSRules {
+	return nil
+}
+
+func (s *EndpointManagerSuite) RemoveRestoredDNSRules(epID uint16) {
 }
 
 type DummyRuleCacheOwner struct{}
@@ -95,7 +107,11 @@ func (d *DummyRuleCacheOwner) ClearPolicyConsumers(id uint16) *sync.WaitGroup {
 
 type dummyEpSyncher struct{}
 
-func (epSync *dummyEpSyncher) RunK8sCiliumEndpointSync(e *endpoint.Endpoint) {}
+func (epSync *dummyEpSyncher) RunK8sCiliumEndpointSync(e *endpoint.Endpoint, conf endpoint.EndpointStatusConfiguration) {
+}
+
+func (epSync *dummyEpSyncher) DeleteK8sCiliumEndpointSync(e *endpoint.Endpoint) {
+}
 
 func (s *EndpointManagerSuite) TestLookup(c *C) {
 	ep := endpoint.NewEndpointWithState(s, &endpoint.FakeEndpointProxy{}, &allocator.FakeIdentityAllocator{}, 10, endpoint.StateReady)

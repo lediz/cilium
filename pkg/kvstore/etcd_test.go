@@ -43,7 +43,7 @@ func (e *EtcdSuite) SetUpTest(c *C) {
 }
 
 func (e *EtcdSuite) TearDownTest(c *C) {
-	Close()
+	Client().Close()
 }
 
 type MaintenanceMocker struct {
@@ -146,12 +146,12 @@ func (s *EtcdSuite) TestETCDVersionCheck(c *C) {
 		},
 	}
 	// Check a good version
-	v, err := getEPVersion(mm, "http://127.0.0.1:4003", time.Second)
+	v, err := getEPVersion(context.TODO(), mm, "http://127.0.0.1:4003", time.Second)
 	c.Assert(err, IsNil)
 	c.Assert(v.String(), Equals, goodVersion)
 
 	// Check a bad version
-	v, err = getEPVersion(mm, "http://127.0.0.1:4004", time.Second)
+	v, err = getEPVersion(context.TODO(), mm, "http://127.0.0.1:4004", time.Second)
 	c.Assert(err, IsNil)
 	c.Assert(v.String(), Equals, badVersionStr)
 
@@ -168,7 +168,7 @@ func (s *EtcdSuite) TestETCDVersionCheck(c *C) {
 	// short timeout for tests
 	versionCheckTimeout = time.Second
 
-	c.Assert(client.checkMinVersion(), IsNil)
+	c.Assert(client.checkMinVersion(context.TODO()), IsNil)
 
 	// One endpoint has a bad version and should fail
 	cfg.Endpoints = []string{"http://127.0.0.1:4003", "http://127.0.0.1:4004", "http://127.0.0.1:4005"}
@@ -179,7 +179,7 @@ func (s *EtcdSuite) TestETCDVersionCheck(c *C) {
 		client: cli,
 	}
 
-	c.Assert(client.checkMinVersion(), Not(IsNil))
+	c.Assert(client.checkMinVersion(context.TODO()), Not(IsNil))
 }
 
 type EtcdHelpersSuite struct{}
@@ -362,7 +362,7 @@ func (e *EtcdLockedSuite) SetUpSuite(c *C) {
 func (e *EtcdLockedSuite) TearDownSuite(c *C) {
 	err := e.etcdClient.Close()
 	c.Assert(err, IsNil)
-	Close()
+	Client().Close()
 }
 
 func (e *EtcdLockedSuite) TestGetIfLocked(c *C) {
@@ -1640,5 +1640,27 @@ func TestGetSvcNamespace(t *testing.T) {
 				t.Errorf("SplitK8sServiceURL() got1 = %v, want %v", got1, tt.wantNamespace)
 			}
 		})
+	}
+}
+func TestShuffleEndpoints(t *testing.T) {
+	s1 := []string{"1", "2", "3", "4", "5"}
+	s2 := make([]string, len(s1))
+	copy(s2, s1)
+
+	var same int
+	for retry := 0; retry < 10; retry++ {
+		same = 0
+		shuffleEndpoints(s2)
+		for i := range s1 {
+			if s1[i] == s2[i] {
+				same++
+			}
+		}
+		if same != len(s1) {
+			break
+		}
+	}
+	if same == len(s1) {
+		t.Errorf("Shuffle() did not modify s2 in 10 retries")
 	}
 }

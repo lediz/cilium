@@ -1,4 +1,4 @@
-// Copyright 2019 Authors of Cilium
+// Copyright 2019-2020 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,28 +18,34 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/cilium/cilium/common/addressing"
+	"github.com/cilium/cilium/pkg/addressing"
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/byteorder"
 	"github.com/cilium/cilium/pkg/datapath"
 	"github.com/cilium/cilium/pkg/datapath/loader/metrics"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/mac"
+	"github.com/cilium/cilium/pkg/maps/callsmap"
 	"github.com/cilium/cilium/pkg/maps/ctmap"
 	"github.com/cilium/cilium/pkg/maps/policymap"
+	"github.com/cilium/cilium/pkg/option"
+)
+
+const (
+	templateSecurityID          = identity.ReservedIdentityWorld
+	templateLxcID               = uint16(65535)
+	templatePolicyVerdictFilter = uint32(0xffff)
 )
 
 var (
-	TemplateSecurityID = identity.ReservedIdentityWorld
-	TemplateLxcID      = uint16(65535)
-	TemplateMAC        = mac.MAC([]byte{0x02, 0x00, 0x60, 0x0D, 0xF0, 0x0D})
-	TemplateIPv4       = []byte{192, 0, 2, 3}
-	TemplateIPv6       = []byte{0x20, 0x01, 0xdb, 0x8, 0x0b, 0xad, 0xca, 0xfe, 0x60, 0x0d, 0xbe, 0xe2, 0x0b, 0xad, 0xca, 0xfe}
+	templateIPv4 = []byte{192, 0, 2, 3}
+	templateIPv6 = []byte{0x20, 0x01, 0xdb, 0x8, 0x0b, 0xad, 0xca, 0xfe, 0x60, 0x0d, 0xbe, 0xe2, 0x0b, 0xad, 0xca, 0xfe}
 
-	CallsMapName   = "cilium_calls_"
+	templateMAC = mac.MAC([]byte{0x02, 0x00, 0x60, 0x0D, 0xF0, 0x0D})
+
 	elfMapPrefixes = []string{
 		policymap.MapName,
-		CallsMapName,
+		callsmap.MapName,
 	}
 	elfCtMapPrefixes = []string{
 		ctmap.MapNameTCP4,
@@ -64,7 +70,10 @@ var (
 // program directly to a device, that there are no unintended consequences such
 // as allowing traffic to leak out with routable addresses.
 type templateCfg struct {
-	datapath.EndpointConfiguration
+	// CompileTimeConfiguration passes through directly to the underlying
+	// endpoint configuration, while the rest of the EndpointConfiguration
+	// interface is implemented directly here through receiver functions.
+	datapath.CompileTimeConfiguration
 	stats *metrics.SpanStat
 }
 
@@ -77,7 +86,7 @@ type templateCfg struct {
 // means that the calling code must approprately substitute the ID in the ELF
 // prior to load, or it will fail with a relatively obvious error.
 func (t *templateCfg) GetID() uint64 {
-	return uint64(TemplateLxcID)
+	return uint64(templateLxcID)
 }
 
 // StringID returns the string form of the ID returned by GetID().
@@ -89,19 +98,26 @@ func (t *templateCfg) StringID() string {
 // ever some weird bug that causes the template value here to be used, it will
 // be in the least privileged security context.
 func (t *templateCfg) GetIdentity() identity.NumericIdentity {
-	return TemplateSecurityID
+	return templateSecurityID
+}
+
+// GetIdentityLocked is identical to GetIdentity(). This is a temporary
+// function until WriteEndpointConfig() no longer assumes that the endpoint is
+// locked.
+func (t *templateCfg) GetIdentityLocked() identity.NumericIdentity {
+	return templateSecurityID
 }
 
 // GetNodeMAC returns a well-known dummy MAC address which may be later
 // substituted in the ELF.
 func (t *templateCfg) GetNodeMAC() mac.MAC {
-	return TemplateMAC
+	return templateMAC
 }
 
 // IPv4Address always returns an IP in the documentation prefix (RFC5737) as
 // a nonsense address that should typically not be routable.
 func (t *templateCfg) IPv4Address() addressing.CiliumIPv4 {
-	return addressing.CiliumIPv4(TemplateIPv4)
+	return addressing.CiliumIPv4(templateIPv4)
 }
 
 // IPv6Address returns an IP in the documentation prefix (RFC3849) to ensure
@@ -109,20 +125,27 @@ func (t *templateCfg) IPv4Address() addressing.CiliumIPv4 {
 // described in the structure definition. This can't be guaranteed while using
 // a more appropriate prefix such as the discard prefix (RFC6666).
 func (t *templateCfg) IPv6Address() addressing.CiliumIPv6 {
-	return addressing.CiliumIPv6(TemplateIPv6)
+	return addressing.CiliumIPv6(templateIPv6)
+}
+
+// GetPolicyVerdictLogFilter returns an uint32 filter to ensure
+// that the filter is non-zero as per the requirements
+// described in the structure definition.
+func (t *templateCfg) GetPolicyVerdictLogFilter() uint32 {
+	return templatePolicyVerdictFilter
 }
 
 // wrap takes an endpoint configuration and optional stats tracker and wraps
 // it inside a templateCfg which hides static data from callers that wish to
 // generate header files based on the configuration, substituting it for
 // template data.
-func wrap(cfg datapath.EndpointConfiguration, stats *metrics.SpanStat) *templateCfg {
+func wrap(cfg datapath.CompileTimeConfiguration, stats *metrics.SpanStat) *templateCfg {
 	if stats == nil {
 		stats = &metrics.SpanStat{}
 	}
 	return &templateCfg{
-		EndpointConfiguration: cfg,
-		stats:                 stats,
+		CompileTimeConfiguration: cfg,
+		stats:                    stats,
 	}
 }
 
@@ -131,22 +154,27 @@ func wrap(cfg datapath.EndpointConfiguration, stats *metrics.SpanStat) *template
 // endpoint.
 func elfMapSubstitutions(ep datapath.Endpoint) map[string]string {
 	result := make(map[string]string)
-
 	epID := uint16(ep.GetID())
+
 	for _, name := range elfMapPrefixes {
-		templateStr := bpf.LocalMapName(name, TemplateLxcID)
+		if ep.IsHost() && name == callsmap.MapName {
+			name = callsmap.HostMapName
+		}
+		templateStr := bpf.LocalMapName(name, templateLxcID)
 		desiredStr := bpf.LocalMapName(name, epID)
 		result[templateStr] = desiredStr
 	}
 	if ep.ConntrackLocalLocked() {
 		for _, name := range elfCtMapPrefixes {
-			templateStr := bpf.LocalMapName(name, TemplateLxcID)
+			templateStr := bpf.LocalMapName(name, templateLxcID)
 			desiredStr := bpf.LocalMapName(name, epID)
 			result[templateStr] = desiredStr
 		}
 	}
 
-	result[policymap.CallString(TemplateLxcID)] = policymap.CallString(epID)
+	if !ep.IsHost() {
+		result[policymap.CallString(templateLxcID)] = policymap.CallString(epID)
+	}
 	return result
 }
 
@@ -196,11 +224,32 @@ func elfVariableSubstitutions(ep datapath.Endpoint) map[string]uint32 {
 	mac := ep.GetNodeMAC()
 	result["NODE_MAC_1"] = sliceToBe32(mac[0:4])
 	result["NODE_MAC_2"] = uint32(sliceToBe16(mac[4:6]))
-	result["LXC_ID"] = uint32(ep.GetID())
+
+	// These values are defined in nodeport.h regardless even for bpf_lxc (so
+	// regardless of whether it's the host endpoint).
+	if option.Config.EnableNodePort && option.Config.EnableIPv6 {
+		result["IPV6_NODEPORT_1"] = 0
+		result["IPV6_NODEPORT_2"] = 0
+		result["IPV6_NODEPORT_3"] = 0
+		result["IPV6_NODEPORT_4"] = 0
+	}
+
+	if ep.IsHost() {
+		if option.Config.EnableNodePort {
+			result["NATIVE_DEV_IFINDEX"] = 0
+			if option.Config.EnableIPv4 {
+				result["IPV4_NODEPORT"] = 0
+			}
+		}
+		result["HOST_EP_ID"] = uint32(ep.GetID())
+	} else {
+		result["LXC_ID"] = uint32(ep.GetID())
+	}
+
 	identity := ep.GetIdentity().Uint32()
 	result["SECLABEL"] = identity
 	result["SECLABEL_NB"] = byteorder.HostToNetwork(identity).(uint32)
-
+	result["POLICY_VERDICT_LOG_FILTER"] = ep.GetPolicyVerdictLogFilter()
 	return result
 
 }

@@ -12,11 +12,14 @@ import (
 type AuthorizeClientVpnIngressInput struct {
 	_ struct{} `type:"structure"`
 
-	// The ID of the Active Directory group to grant access.
+	// The ID of the group to grant access to, for example, the Active Directory
+	// group or identity provider (IdP) group. Required if AuthorizeAllGroups is
+	// false or not specified.
 	AccessGroupId *string `type:"string"`
 
-	// Indicates whether to grant access to all clients. Use true to grant all clients
-	// who successfully establish a VPN connection access to the network.
+	// Indicates whether to grant access to all clients. Specify true to grant all
+	// clients who successfully establish a VPN connection access to the network.
+	// Must be set to true if AccessGroupId is not specified.
 	AuthorizeAllGroups *bool `type:"boolean"`
 
 	// Unique, case-sensitive identifier that you provide to ensure the idempotency
@@ -109,6 +112,7 @@ func (c *Client) AuthorizeClientVpnIngressRequest(input *AuthorizeClientVpnIngre
 	}
 
 	req := c.newRequest(op, input, &AuthorizeClientVpnIngressOutput{})
+
 	return AuthorizeClientVpnIngressRequest{Request: req, Input: input, Copy: c.AuthorizeClientVpnIngressRequest}
 }
 

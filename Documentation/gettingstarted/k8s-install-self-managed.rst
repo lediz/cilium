@@ -2,7 +2,7 @@
 
     WARNING: You are looking at unreleased Cilium documentation.
     Please use the official rendered version released here:
-    http://docs.cilium.io
+    https://docs.cilium.io
 
 Self-Managed Kubernetes
 =======================
@@ -19,3 +19,4 @@ for details on when etcd is required.
    k8s-install-default
    k8s-install-etcd-operator
    k8s-install-external-etcd
+   k8s-install-openshift-okd

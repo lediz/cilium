@@ -62,7 +62,7 @@ func init() {
 	flags.StringP("host", "H", "", "URI to server-side API")
 	viper.BindPFlags(flags)
 	rootCmd.AddCommand(newCmdCompletion(os.Stdout))
-	rootCmd.SetOut(os.Stderr)
+	rootCmd.SetOut(os.Stdout)
 	rootCmd.SetErr(os.Stderr)
 }
 
@@ -95,8 +95,7 @@ func initConfig() {
 	}
 }
 
-const copyRightHeader = `
-# Copyright 2017 Authors of Cilium
+const copyRightHeader = `# Copyright 2017-2020 Authors of Cilium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -143,7 +142,12 @@ var (
 	  # Cilium shell completion
 	  source '$HOME/.cilium/completion.zsh.inc'
 	  " >> $HOME/.zshrc
-	source $HOME/.zshrc`
+	source $HOME/.zshrc
+
+# Installing fish completion on Linux/macOS
+## Write fish completion code to fish specific location
+	cilium completion fish > ~/.config/fish/completions/cilium.fish
+`
 )
 
 func newCmdCompletion(out io.Writer) *cobra.Command {
@@ -155,7 +159,7 @@ func newCmdCompletion(out io.Writer) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCompletion(out, cmd, args)
 		},
-		ValidArgs: []string{"bash", "zsh"},
+		ValidArgs: []string{"bash", "zsh", "fish"},
 	}
 
 	return cmd
@@ -163,21 +167,26 @@ func newCmdCompletion(out io.Writer) *cobra.Command {
 
 func runCompletion(out io.Writer, cmd *cobra.Command, args []string) error {
 	if len(args) > 1 {
-		return fmt.Errorf("Too many arguments. Expected only the shell type.")
-	}
-	if _, err := out.Write([]byte(copyRightHeader)); err != nil {
-		return err
-	}
-	if len(args) == 0 {
-		return cmd.Parent().GenBashCompletion(out)
+		return fmt.Errorf("too many arguments; expected only the shell type: %s", args)
 	}
 
-	switch args[0] {
-	case "bash":
-		return cmd.Parent().GenBashCompletion(out)
-	case "zsh":
-		return cmd.Parent().GenZshCompletion(out)
+	if len(args) == 0 || args[0] == "bash" {
+		if _, err := out.Write([]byte(copyRightHeader)); err != nil {
+			return err
+		}
+		return cmd.Root().GenBashCompletion(out)
 	}
-
-	return fmt.Errorf("Unexpected shell: %s.", args[0])
+	if args[0] == "zsh" {
+		if _, err := out.Write([]byte(copyRightHeader)); err != nil {
+			return err
+		}
+		return cmd.Root().GenZshCompletion(out)
+	}
+	if args[0] == "fish" {
+		if _, err := out.Write([]byte(copyRightHeader)); err != nil {
+			return err
+		}
+		return cmd.Root().GenFishCompletion(out, true)
+	}
+	return fmt.Errorf("unsupported shell: %s", args[0])
 }

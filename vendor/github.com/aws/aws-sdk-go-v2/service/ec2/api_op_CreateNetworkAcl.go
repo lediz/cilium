@@ -18,6 +18,9 @@ type CreateNetworkAclInput struct {
 	// it is UnauthorizedOperation.
 	DryRun *bool `locationName:"dryRun" type:"boolean"`
 
+	// The tags to assign to the network ACL.
+	TagSpecifications []TagSpecification `locationName:"TagSpecification" locationNameList:"item" type:"list"`
+
 	// The ID of the VPC.
 	//
 	// VpcId is a required field
@@ -86,6 +89,7 @@ func (c *Client) CreateNetworkAclRequest(input *CreateNetworkAclInput) CreateNet
 	}
 
 	req := c.newRequest(op, input, &CreateNetworkAclOutput{})
+
 	return CreateNetworkAclRequest{Request: req, Input: input, Copy: c.CreateNetworkAclRequest}
 }
 

@@ -2,7 +2,7 @@
 
     WARNING: You are looking at unreleased Cilium documentation.
     Please use the official rendered version released here:
-    http://docs.cilium.io
+    https://docs.cilium.io
 
 ******
 Calico
@@ -10,6 +10,12 @@ Calico
 
 This guide instructs how to install Cilium in chaining configuration on top of
 `Calico <https://github.com/projectcalico/calico>`_.
+
+.. note::
+
+   When running Cilium in chaining configuration on top of Calico, the L7
+   policies may not work because of conflicting packet mark usage. This
+   limitation is currently tracked at `#12454 <https://github.com/cilium/cilium/issues/12454>`_.
 
 Create a CNI configuration
 ==========================
@@ -74,11 +80,12 @@ Deploy Cilium release via Helm:
 
     helm install cilium |CHART_RELEASE| \\
       --namespace=kube-system \\
-      --set global.cni.chainingMode=generic-veth \\
-      --set global.cni.customConf=true \\
-      --set global.cni.configMap=cni-configuration \\
-      --set global.tunnel=disabled \\
-      --set global.masquerade=false
+      --set cni.chainingMode=generic-veth \\
+      --set cni.customConf=true \\
+      --set cni.configMap=cni-configuration \\
+      --set tunnel=disabled \\
+      --set masquerade=false \\
+      --set enableIdentityMark=false
 
 .. note::
 
@@ -91,6 +98,6 @@ Deploy Cilium release via Helm:
    them.
 
 .. include:: k8s-install-validate.rst
-.. include:: hubble-install.rst
-.. include:: getting-started-next-steps.rst
+.. include:: namespace-kube-system.rst
+.. include:: hubble-enable.rst
 

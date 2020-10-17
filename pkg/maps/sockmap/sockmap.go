@@ -16,14 +16,13 @@ package sockmap
 
 import (
 	"fmt"
-	"net"
 	"sync"
 	"unsafe"
 
-	"github.com/cilium/cilium/common/types"
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/types"
 )
 
 // SockmapKey is the 5-tuple used to lookup a socket
@@ -65,31 +64,6 @@ func (k *SockmapKey) GetKeyPtr() unsafe.Pointer { return unsafe.Pointer(k) }
 // NewValue returns a new empty instance of the structure representing the BPF
 // map value
 func (k SockmapKey) NewValue() bpf.MapValue { return &SockmapValue{} }
-
-// NewSockmapKey returns a new key using 5-tuple input.
-func NewSockmapKey(dip, sip net.IP, sport, dport uint32) SockmapKey {
-	result := SockmapKey{}
-
-	if sip4 := sip.To4(); sip4 != nil {
-		result.Family = bpf.EndpointKeyIPv4
-		copy(result.SIP[:], sip4)
-	} else {
-		result.Family = bpf.EndpointKeyIPv6
-		copy(result.SIP[:], sip)
-	}
-
-	if dip4 := dip.To4(); dip4 != nil {
-		result.Family = bpf.EndpointKeyIPv4
-		copy(result.SIP[:], dip4)
-	} else {
-		result.Family = bpf.EndpointKeyIPv6
-		copy(result.DIP[:], dip)
-	}
-
-	result.DPort = dport
-	result.SPort = sport
-	return result
-}
 
 var log = logging.DefaultLogger.WithField(logfields.LogSubsys, "sockmap")
 

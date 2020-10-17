@@ -19,7 +19,7 @@ set -eo pipefail
 DEV="cilium-probe"
 DIR=$(dirname $0)/../../bpf
 MAPTOOL=$(dirname $0)/../../tools/maptool/maptool
-ALL_TC_PROGS="bpf_hostdev_ingress bpf_ipsec bpf_lxc bpf_netdev bpf_network bpf_overlay"
+ALL_TC_PROGS="bpf_lxc bpf_host bpf_network bpf_overlay"
 TC_PROGS=${TC_PROGS:-$ALL_TC_PROGS}
 ALL_CG_PROGS="bpf_sock sockops/bpf_sockops sockops/bpf_redir"
 CG_PROGS=${CG_PROGS:-$ALL_CG_PROGS}
@@ -232,8 +232,7 @@ function load_cg {
 }
 
 function load_xdp {
-	if $IPROUTE2 link set help 2>&1 | grep -q xdpgeneric; then
-		$IPROUTE2 link set dev ${DEV} xdpgeneric off
+	if $IPROUTE2 link set dev ${DEV} xdpgeneric off 2>/dev/null; then
 		for p in ${XDP_PROGS}; do
 			load_prog_dev "$IPROUTE2 link set" "xdpgeneric" ${p}
 		done

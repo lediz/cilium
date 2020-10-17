@@ -65,6 +65,10 @@ type Configuration struct {
 	// are synchronized with the kvstore. This parameter is optional.
 	SynchronizationInterval time.Duration
 
+	// SharedKeyDeleteDelay is the delay before an shared key delete is
+	// handled. This parameter is optional
+	SharedKeyDeleteDelay time.Duration
+
 	// KeyCreator is called to allocate a Key instance when a new shared
 	// key is discovered. This parameter is required.
 	KeyCreator KeyCreator
@@ -92,6 +96,10 @@ func (c *Configuration) validate() error {
 
 	if c.SynchronizationInterval == 0 {
 		c.SynchronizationInterval = option.Config.KVstorePeriodicSync
+	}
+
+	if c.SharedKeyDeleteDelay == 0 {
+		c.SharedKeyDeleteDelay = defaults.NodeDeleteDelay
 	}
 
 	if c.Backend == nil {
@@ -328,6 +336,17 @@ func (s *SharedStore) lookupLocalKey(name string) LocalKey {
 	return nil
 }
 
+// NumEntries returns the number of entries in the store
+func (s *SharedStore) NumEntries() int {
+	if s == nil {
+		return 0
+	}
+
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	return len(s.sharedKeys)
+}
+
 // SharedKeysMap returns a copy of the SharedKeysMap, the returned map can
 // be safely modified but the values of the map represent the actual data
 // stored in the internal SharedStore SharedKeys map.
@@ -445,13 +464,13 @@ func (s *SharedStore) deleteSharedKey(name string) {
 
 	if ok {
 		go func() {
-			time.Sleep(defaults.NodeDeleteDelay)
+			time.Sleep(s.conf.SharedKeyDeleteDelay)
 			s.mutex.RLock()
 			_, ok := s.sharedKeys[name]
 			s.mutex.RUnlock()
 			if ok {
 				log.Warningf("Received node delete event for node %s which re-appeared within %s",
-					name, defaults.NodeDeleteDelay)
+					name, s.conf.SharedKeyDeleteDelay)
 				return
 			}
 

@@ -67,8 +67,8 @@ const opRebootInstances = "RebootInstances"
 // If an instance does not cleanly shut down within four minutes, Amazon EC2
 // performs a hard reboot.
 //
-// For more information about troubleshooting, see Getting Console Output and
-// Rebooting Instances (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instance-console.html)
+// For more information about troubleshooting, see Getting console output and
+// rebooting instances (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instance-console.html)
 // in the Amazon Elastic Compute Cloud User Guide.
 //
 //    // Example sending a request using RebootInstancesRequest.
@@ -93,6 +93,7 @@ func (c *Client) RebootInstancesRequest(input *RebootInstancesInput) RebootInsta
 	req := c.newRequest(op, input, &RebootInstancesOutput{})
 	req.Handlers.Unmarshal.Remove(ec2query.UnmarshalHandler)
 	req.Handlers.Unmarshal.PushBackNamed(protocol.UnmarshalDiscardBodyHandler)
+
 	return RebootInstancesRequest{Request: req, Input: input, Copy: c.RebootInstancesRequest}
 }
 

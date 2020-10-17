@@ -17,11 +17,12 @@
 package bpf
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"syscall"
+	"runtime"
 	"unsafe"
 
 	"github.com/cilium/cilium/pkg/logging/logfields"
@@ -39,7 +40,7 @@ import (
 // When mapType is the type HASH_OF_MAPS an innerID is required to point at a
 // map fd which has the same type/keySize/valueSize/maxEntries as expected map
 // entries. For all other mapTypes innerID is ignored and should be zeroed.
-func CreateMap(mapType int, keySize, valueSize, maxEntries, flags, innerID uint32, path string) (int, error) {
+func CreateMap(mapType MapType, keySize, valueSize, maxEntries, flags, innerID uint32, path string) (int, error) {
 	// This struct must be in sync with union bpf_attr's anonymous struct
 	// used by the BPF_MAP_CREATE command
 	uba := struct {
@@ -68,6 +69,7 @@ func CreateMap(mapType int, keySize, valueSize, maxEntries, flags, innerID uint3
 		uintptr(unsafe.Pointer(&uba)),
 		unsafe.Sizeof(uba),
 	)
+	runtime.KeepAlive(&uba)
 	if option.Config.MetricsConfig.BPFSyscallDurationEnabled {
 		metrics.BPFSyscallDuration.WithLabelValues(metricOpCreate, metrics.Errno2Outcome(err)).Observe(duration.End(err == 0).Total().Seconds())
 	}
@@ -94,11 +96,7 @@ type bpfAttrMapOpElem struct {
 }
 
 // UpdateElementFromPointers updates the map in fd with the given value in the given key.
-// The flags can have the following values:
-// bpf.BPF_ANY to create new element or update existing;
-// bpf.BPF_NOEXIST to create new element if it didn't exist;
-// bpf.BPF_EXIST to update existing element.
-func UpdateElementFromPointers(fd int, structPtr, sizeOfStruct uintptr) error {
+func UpdateElementFromPointers(fd int, structPtr unsafe.Pointer, sizeOfStruct uintptr) error {
 	var duration *spanstat.SpanStat
 	if option.Config.MetricsConfig.BPFSyscallDurationEnabled {
 		duration = spanstat.Start()
@@ -106,9 +104,10 @@ func UpdateElementFromPointers(fd int, structPtr, sizeOfStruct uintptr) error {
 	ret, _, err := unix.Syscall(
 		unix.SYS_BPF,
 		BPF_MAP_UPDATE_ELEM,
-		structPtr,
+		uintptr(structPtr),
 		sizeOfStruct,
 	)
+	runtime.KeepAlive(structPtr)
 	if option.Config.MetricsConfig.BPFSyscallDurationEnabled {
 		metrics.BPFSyscallDuration.WithLabelValues(metricOpUpdate, metrics.Errno2Outcome(err)).Observe(duration.End(err == 0).Total().Seconds())
 	}
@@ -134,12 +133,15 @@ func UpdateElement(fd int, key, value unsafe.Pointer, flags uint64) error {
 		flags: uint64(flags),
 	}
 
-	return UpdateElementFromPointers(fd, uintptr(unsafe.Pointer(&uba)), unsafe.Sizeof(uba))
+	ret := UpdateElementFromPointers(fd, unsafe.Pointer(&uba), unsafe.Sizeof(uba))
+	runtime.KeepAlive(key)
+	runtime.KeepAlive(value)
+	return ret
 }
 
 // LookupElement looks up for the map value stored in fd with the given key. The value
 // is stored in the value unsafe.Pointer.
-func LookupElementFromPointers(fd int, structPtr, sizeOfStruct uintptr) error {
+func LookupElementFromPointers(fd int, structPtr unsafe.Pointer, sizeOfStruct uintptr) error {
 	var duration *spanstat.SpanStat
 	if option.Config.MetricsConfig.BPFSyscallDurationEnabled {
 		duration = spanstat.Start()
@@ -147,15 +149,16 @@ func LookupElementFromPointers(fd int, structPtr, sizeOfStruct uintptr) error {
 	ret, _, err := unix.Syscall(
 		unix.SYS_BPF,
 		BPF_MAP_LOOKUP_ELEM,
-		structPtr,
+		uintptr(structPtr),
 		sizeOfStruct,
 	)
+	runtime.KeepAlive(structPtr)
 	if option.Config.MetricsConfig.BPFSyscallDurationEnabled {
 		metrics.BPFSyscallDuration.WithLabelValues(metricOpLookup, metrics.Errno2Outcome(err)).Observe(duration.End(err == 0).Total().Seconds())
 	}
 
 	if ret != 0 || err != 0 {
-		return fmt.Errorf("Unable to lookup element in map with file descriptor %d: %s", fd, err)
+		return fmt.Errorf("Unable to lookup element in map with file descriptor %d: %w", fd, err)
 	}
 
 	return nil
@@ -171,10 +174,13 @@ func LookupElement(fd int, key, value unsafe.Pointer) error {
 		value: uint64(uintptr(value)),
 	}
 
-	return LookupElementFromPointers(fd, uintptr(unsafe.Pointer(&uba)), unsafe.Sizeof(uba))
+	ret := LookupElementFromPointers(fd, unsafe.Pointer(&uba), unsafe.Sizeof(uba))
+	runtime.KeepAlive(key)
+	runtime.KeepAlive(value)
+	return ret
 }
 
-func deleteElement(fd int, key unsafe.Pointer) (uintptr, syscall.Errno) {
+func deleteElement(fd int, key unsafe.Pointer) (uintptr, unix.Errno) {
 	uba := bpfAttrMapOpElem{
 		mapFd: uint32(fd),
 		key:   uint64(uintptr(key)),
@@ -189,6 +195,8 @@ func deleteElement(fd int, key unsafe.Pointer) (uintptr, syscall.Errno) {
 		uintptr(unsafe.Pointer(&uba)),
 		unsafe.Sizeof(uba),
 	)
+	runtime.KeepAlive(key)
+	runtime.KeepAlive(&uba)
 	if option.Config.MetricsConfig.BPFSyscallDurationEnabled {
 		metrics.BPFSyscallDuration.WithLabelValues(metricOpDelete, metrics.Errno2Outcome(err)).Observe(duration.End(err == 0).Total().Seconds())
 	}
@@ -209,8 +217,7 @@ func DeleteElement(fd int, key unsafe.Pointer) error {
 
 // GetNextKeyFromPointers stores, in nextKey, the next key after the key of the
 // map in fd. When there are no more keys, io.EOF is returned.
-func GetNextKeyFromPointers(fd int, structPtr, sizeOfStruct uintptr) error {
-
+func GetNextKeyFromPointers(fd int, structPtr unsafe.Pointer, sizeOfStruct uintptr) error {
 	var duration *spanstat.SpanStat
 	if option.Config.MetricsConfig.BPFSyscallDurationEnabled {
 		duration = spanstat.Start()
@@ -218,16 +225,17 @@ func GetNextKeyFromPointers(fd int, structPtr, sizeOfStruct uintptr) error {
 	ret, _, err := unix.Syscall(
 		unix.SYS_BPF,
 		BPF_MAP_GET_NEXT_KEY,
-		structPtr,
+		uintptr(structPtr),
 		sizeOfStruct,
 	)
+	runtime.KeepAlive(structPtr)
 	if option.Config.MetricsConfig.BPFSyscallDurationEnabled {
 		metrics.BPFSyscallDuration.WithLabelValues(metricOpGetNextKey, metrics.Errno2Outcome(err)).Observe(duration.End(err == 0).Total().Seconds())
 	}
 
 	// BPF_MAP_GET_NEXT_KEY returns ENOENT when all keys have been iterated
 	// translate that to io.EOF to signify there are no next keys
-	if err == syscall.ENOENT {
+	if err == unix.ENOENT {
 		return io.EOF
 	}
 
@@ -247,7 +255,10 @@ func GetNextKey(fd int, key, nextKey unsafe.Pointer) error {
 		value: uint64(uintptr(nextKey)),
 	}
 
-	return GetNextKeyFromPointers(fd, uintptr(unsafe.Pointer(&uba)), unsafe.Sizeof(uba))
+	ret := GetNextKeyFromPointers(fd, unsafe.Pointer(&uba), unsafe.Sizeof(uba))
+	runtime.KeepAlive(key)
+	runtime.KeepAlive(nextKey)
+	return ret
 }
 
 // GetFirstKey fetches the first key in the map. If there are no keys in the
@@ -259,7 +270,9 @@ func GetFirstKey(fd int, nextKey unsafe.Pointer) error {
 		value: uint64(uintptr(nextKey)),
 	}
 
-	return GetNextKeyFromPointers(fd, uintptr(unsafe.Pointer(&uba)), unsafe.Sizeof(uba))
+	ret := GetNextKeyFromPointers(fd, unsafe.Pointer(&uba), unsafe.Sizeof(uba))
+	runtime.KeepAlive(nextKey)
+	return ret
 }
 
 // This struct must be in sync with union bpf_attr's anonymous struct used by
@@ -272,7 +285,10 @@ type bpfAttrObjOp struct {
 
 // ObjPin stores the map's fd in pathname.
 func ObjPin(fd int, pathname string) error {
-	pathStr := syscall.StringBytePtr(pathname)
+	pathStr, err := unix.BytePtrFromString(pathname)
+	if err != nil {
+		return fmt.Errorf("Unable to convert pathname %q to byte pointer: %w", pathname, err)
+	}
 	uba := bpfAttrObjOp{
 		pathname: uint64(uintptr(unsafe.Pointer(pathStr))),
 		fd:       uint32(fd),
@@ -282,18 +298,21 @@ func ObjPin(fd int, pathname string) error {
 	if option.Config.MetricsConfig.BPFSyscallDurationEnabled {
 		duration = spanstat.Start()
 	}
-	ret, _, err := unix.Syscall(
+	ret, _, errno := unix.Syscall(
 		unix.SYS_BPF,
 		BPF_OBJ_PIN,
 		uintptr(unsafe.Pointer(&uba)),
 		unsafe.Sizeof(uba),
 	)
+	runtime.KeepAlive(pathStr)
+	runtime.KeepAlive(&uba)
+
 	if option.Config.MetricsConfig.BPFSyscallDurationEnabled {
-		metrics.BPFSyscallDuration.WithLabelValues(metricOpObjPin, metrics.Errno2Outcome(err)).Observe(duration.End(err == 0).Total().Seconds())
+		metrics.BPFSyscallDuration.WithLabelValues(metricOpObjPin, metrics.Errno2Outcome(errno)).Observe(duration.End(errno == 0).Total().Seconds())
 	}
 
-	if ret != 0 || err != 0 {
-		return fmt.Errorf("Unable to pin object with file descriptor %d to %s: %s", fd, pathname, err)
+	if ret != 0 || errno != 0 {
+		return fmt.Errorf("Unable to pin object with file descriptor %d to %s: %s", fd, pathname, errno)
 	}
 
 	return nil
@@ -301,7 +320,10 @@ func ObjPin(fd int, pathname string) error {
 
 // ObjGet reads the pathname and returns the map's fd read.
 func ObjGet(pathname string) (int, error) {
-	pathStr := syscall.StringBytePtr(pathname)
+	pathStr, err := unix.BytePtrFromString(pathname)
+	if err != nil {
+		return 0, fmt.Errorf("Unable to convert pathname %q to byte pointer: %w", pathname, err)
+	}
 	uba := bpfAttrObjOp{
 		pathname: uint64(uintptr(unsafe.Pointer(pathStr))),
 	}
@@ -310,20 +332,22 @@ func ObjGet(pathname string) (int, error) {
 	if option.Config.MetricsConfig.BPFSyscallDurationEnabled {
 		duration = spanstat.Start()
 	}
-	fd, _, err := unix.Syscall(
+	fd, _, errno := unix.Syscall(
 		unix.SYS_BPF,
 		BPF_OBJ_GET,
 		uintptr(unsafe.Pointer(&uba)),
 		unsafe.Sizeof(uba),
 	)
+	runtime.KeepAlive(pathStr)
+	runtime.KeepAlive(&uba)
 	if option.Config.MetricsConfig.BPFSyscallDurationEnabled {
-		metrics.BPFSyscallDuration.WithLabelValues(metricOpObjGet, metrics.Errno2Outcome(err)).Observe(duration.End(err == 0).Total().Seconds())
+		metrics.BPFSyscallDuration.WithLabelValues(metricOpObjGet, metrics.Errno2Outcome(errno)).Observe(duration.End(errno == 0).Total().Seconds())
 	}
 
-	if fd == 0 || err != 0 {
+	if fd == 0 || errno != 0 {
 		return 0, &os.PathError{
 			Op:   "Unable to get object",
-			Err:  err,
+			Err:  errno,
 			Path: pathname,
 		}
 	}
@@ -353,6 +377,7 @@ func MapFdFromID(id int) (int, error) {
 		uintptr(unsafe.Pointer(&uba)),
 		unsafe.Sizeof(uba),
 	)
+	runtime.KeepAlive(&uba)
 	if option.Config.MetricsConfig.BPFSyscallDurationEnabled {
 		metrics.BPFSyscallDuration.WithLabelValues(metricOpGetFDByID, metrics.Errno2Outcome(err)).Observe(duration.End(err == 0).Total().Seconds())
 	}
@@ -372,7 +397,7 @@ func ObjClose(fd int) error {
 	return nil
 }
 
-func objCheck(fd int, path string, mapType int, keySize, valueSize, maxEntries, flags uint32) bool {
+func objCheck(fd int, path string, mapType MapType, keySize, valueSize, maxEntries, flags uint32) bool {
 	info, err := GetMapInfo(os.Getpid(), fd)
 	if err != nil {
 		return false
@@ -381,10 +406,10 @@ func objCheck(fd int, path string, mapType int, keySize, valueSize, maxEntries, 
 	scopedLog := log.WithField(logfields.Path, path)
 	mismatch := false
 
-	if int(info.MapType) != mapType {
+	if info.MapType != mapType {
 		scopedLog.WithFields(logrus.Fields{
 			"old": info.MapType,
-			"new": MapType(mapType),
+			"new": mapType,
 		}).Warning("Map type mismatch for BPF map")
 		mismatch = true
 	}
@@ -437,25 +462,33 @@ func objCheck(fd int, path string, mapType int, keySize, valueSize, maxEntries, 
 	return false
 }
 
-func OpenOrCreateMap(path string, mapType int, keySize, valueSize, maxEntries, flags uint32, innerID uint32, pin bool) (int, bool, error) {
+func OpenOrCreateMap(path string, mapType MapType, keySize, valueSize, maxEntries, flags uint32, innerID uint32, pin bool) (int, bool, error) {
 	var fd int
+	var err error
 
 	redo := false
 	isNewMap := false
 
 recreate:
-	if _, err := os.Stat(path); os.IsNotExist(err) || redo {
-		mapDir := filepath.Dir(path)
-		if _, err = os.Stat(mapDir); os.IsNotExist(err) {
-			if err = os.MkdirAll(mapDir, 0755); err != nil {
-				return 0, isNewMap, &os.PathError{
-					Op:   "Unable create map base directory",
-					Path: path,
-					Err:  err,
+	create := true
+	if pin {
+		if _, err := os.Stat(path); os.IsNotExist(err) || redo {
+			mapDir := filepath.Dir(path)
+			if _, err = os.Stat(mapDir); os.IsNotExist(err) {
+				if err = os.MkdirAll(mapDir, 0755); err != nil {
+					return 0, isNewMap, &os.PathError{
+						Op:   "Unable create map base directory",
+						Path: path,
+						Err:  err,
+					}
 				}
 			}
+		} else {
+			create = false
 		}
+	}
 
+	if create {
 		fd, err = CreateMap(
 			mapType,
 			keySize,
@@ -490,7 +523,7 @@ recreate:
 		return fd, isNewMap, nil
 	}
 
-	fd, err := ObjGet(path)
+	fd, err = ObjGet(path)
 	if err == nil {
 		redo = objCheck(
 			fd,
@@ -524,6 +557,34 @@ func GetMtime() (uint64, error) {
 	}
 
 	return uint64(unix.TimespecToNsec(ts)), nil
+}
+
+const (
+	timerInfoFilepath = "/proc/timer_list"
+)
+
+// GetJtime returns a close-enough approximation of kernel jiffies
+// that can be used to compare against jiffies BPF helper. We parse
+// it from /proc/timer_list. GetJtime() should be invoked only at
+// mid-low frequencies.
+func GetJtime() (uint64, error) {
+	jiffies := uint64(0)
+	scaler := uint64(8)
+	timers, err := os.Open(timerInfoFilepath)
+	if err != nil {
+		return 0, err
+	}
+	defer timers.Close()
+	scanner := bufio.NewScanner(timers)
+	for scanner.Scan() {
+		tmp := uint64(0)
+		n, _ := fmt.Sscanf(scanner.Text(), "jiffies: %d\n", &tmp)
+		if n == 1 {
+			jiffies = tmp
+			break
+		}
+	}
+	return jiffies >> scaler, scanner.Err()
 }
 
 type bpfAttrProg struct {
@@ -597,10 +658,64 @@ func TestDummyProg(progType ProgType, attachType uint32) error {
 		ret, _, errno := unix.Syscall(unix.SYS_BPF, BPF_PROG_ATTACH,
 			uintptr(unsafe.Pointer(&bpfAttr)),
 			unsafe.Sizeof(bpfAttr))
-		if int(ret) < 0 && errno != syscall.EBADF {
+		if int(ret) < 0 && errno != unix.EBADF {
 			return errno
 		}
 		return nil
 	}
+
+	runtime.KeepAlive(&insns)
+	runtime.KeepAlive(&license)
+	runtime.KeepAlive(&bpfAttr)
+
 	return errno
+}
+
+type BpfMapInfo struct {
+	Type       uint32
+	Id         uint32
+	KeySize    uint32
+	ValueSize  uint32
+	MaxEntries uint32
+	MapFlags   uint32
+}
+
+// GetMapInfoByFd returns map info for a map which is pointed by the given fd.
+func GetMapInfoByFd(fd uint32) (*BpfMapInfo, error) {
+	info := BpfMapInfo{}
+	uba := struct {
+		bpfFd   uint32
+		infoLen uint32
+		info    uint64
+	}{
+		uint32(fd),
+		uint32(unsafe.Sizeof(info)),
+		uint64(uintptr(unsafe.Pointer(&info))),
+	}
+
+	var duration *spanstat.SpanStat
+	if option.Config.MetricsConfig.BPFSyscallDurationEnabled {
+		duration = spanstat.Start()
+	}
+
+	ret, _, err := unix.Syscall(
+		unix.SYS_BPF,
+		BPF_OBJ_GET_INFO_BY_FD,
+		uintptr(unsafe.Pointer(&uba)),
+		unsafe.Sizeof(uba),
+	)
+	runtime.KeepAlive(&uba)
+
+	if option.Config.MetricsConfig.BPFSyscallDurationEnabled {
+		metrics.BPFSyscallDuration.WithLabelValues(metricOpGetMapInfoByFD, metrics.Errno2Outcome(err)).Observe(duration.End(err == 0).Total().Seconds())
+	}
+
+	if err != 0 {
+		return nil, fmt.Errorf("Unable to get BPF map info by fd %d: %w", fd, err)
+	}
+	if ret != 0 {
+		return nil, fmt.Errorf("Unable to get BPF map info by fd %d: %d", fd, ret)
+	}
+
+	return &info, nil
 }

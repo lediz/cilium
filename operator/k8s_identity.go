@@ -1,4 +1,4 @@
-// Copyright 2019 Authors of Cilium
+// Copyright 2019-2020 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,14 +18,16 @@ import (
 	"context"
 	"time"
 
+	"github.com/cilium/cilium/operator/identity"
+	operatorOption "github.com/cilium/cilium/operator/option"
+	"github.com/cilium/cilium/operator/watchers"
 	"github.com/cilium/cilium/pkg/controller"
-	"github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/k8s/informer"
-	"github.com/cilium/cilium/pkg/k8s/types"
 	"github.com/cilium/cilium/pkg/logging/logfields"
-	"github.com/sirupsen/logrus"
 
-	"k8s.io/api/core/v1"
+	"github.com/sirupsen/logrus"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -36,10 +38,16 @@ var identityStore cache.Store
 
 // deleteIdentity deletes an identity. It includes the resource version and
 // will error if the object has since been changed.
-func deleteIdentity(identity *types.Identity) error {
-	err := ciliumK8sClient.CiliumV2().CiliumIdentities().Delete(
+func deleteIdentity(ctx context.Context, identity *v2.CiliumIdentity) error {
+	// Wait until we can delete an identity
+	err := identityRateLimiter.Wait(ctx)
+	if err != nil {
+		return err
+	}
+	err = ciliumK8sClient.CiliumV2().CiliumIdentities().Delete(
+		ctx,
 		identity.Name,
-		&metav1.DeleteOptions{
+		metav1.DeleteOptions{
 			Preconditions: &metav1.Preconditions{
 				UID:             &identity.UID,
 				ResourceVersion: &identity.ResourceVersion,
@@ -47,84 +55,129 @@ func deleteIdentity(identity *types.Identity) error {
 		})
 	if err != nil {
 		log.WithError(err).Error("Unable to delete identity")
+	} else {
+		log.WithFields(logrus.Fields{"identity": identity.GetName()}).Info("Garbage collected identity")
 	}
 
 	return err
 }
 
+var identityHeartbeat *identity.IdentityHeartbeatStore
+
 // identityGCIteration is a single iteration of a garbage collection. It will
-// delete identities that have node status entries that are all older than
-// k8sIdentityHeartbeatTimeout.
-// Note: cilium-operator deletes identities in the OnDelete handler when they
-// have no nodes using them (status is empty). This generally means that
-// deletes here are for longer lived identities with no active users.
-func identityGCIteration() {
+// delete identities that have not had its heartbeat lifesign updated since
+// option.Config.IdentityHeartbeatTimeout
+func identityGCIteration(ctx context.Context) {
 	log.Debug("Running CRD identity garbage collector")
 
 	if identityStore == nil {
 		log.Debug("Identity store cache is not ready yet")
 		return
 	}
+	select {
+	case <-watchers.CiliumEndpointsSynced:
+	case <-ctx.Done():
+		return
+	}
 
-nextIdentity:
+	timeNow := time.Now()
 	for _, identityObject := range identityStore.List() {
-		identity, ok := identityObject.(*types.Identity)
+		identity, ok := identityObject.(*v2.CiliumIdentity)
 		if !ok {
 			log.WithField(logfields.Object, identityObject).
 				Errorf("Saw %T object while expecting k8s/types.Identity", identityObject)
 			continue
 		}
 
-		for _, heartbeat := range identity.Status.Nodes {
-			if time.Since(heartbeat.Time) < k8sIdentityHeartbeatTimeout {
-				continue nextIdentity
+		// The identity is definitely alive if there's a CE using it.
+		if watchers.HasCEWithIdentity(identity.Name) {
+			// If the identity is alive then mark it as alive
+			identityHeartbeat.MarkAlive(identity.Name, timeNow)
+			continue
+		}
+		if !identityHeartbeat.IsAlive(identity.Name) {
+			log.WithFields(logrus.Fields{
+				logfields.Identity: identity,
+			}).Debug("Deleting unused identity")
+			if err := deleteIdentity(ctx, identity); err != nil {
+				log.WithError(err).WithFields(logrus.Fields{
+					logfields.Identity: identity,
+				}).Error("Deleting unused identity")
+				// If Context was canceled we should break
+				if ctx.Err() != nil {
+					break
+				}
 			}
 		}
-
-		log.WithFields(logrus.Fields{
-			logfields.Identity: identity,
-			"nodes":            identity.Status.Nodes,
-		}).Debug("Deleting unused identity")
-		deleteIdentity(identity)
 	}
+
+	identityHeartbeat.GC()
 }
 
 func startCRDIdentityGC() {
-	log.Infof("Starting CRD identity garbage collector with %s interval...", identityGCInterval)
+	if operatorOption.Config.EndpointGCInterval == 0 {
+		log.Fatal("The CiliumIdentity garbage collector requires the CiliumEndpoint garbage collector to be enabled")
+	}
+
+	log.Infof("Starting CRD identity garbage collector with %s interval...", operatorOption.Config.IdentityGCInterval)
 
 	controller.NewManager().UpdateController("crd-identity-gc",
 		controller.ControllerParams{
-			RunInterval: identityGCInterval,
+			RunInterval: operatorOption.Config.IdentityGCInterval,
 			DoFunc: func(ctx context.Context) error {
-				identityGCIteration()
-				return nil
+				identityGCIteration(ctx)
+				return ctx.Err()
 			},
 		})
 }
 
-func handleIdentityUpdate(identity *types.Identity) {
-	// If no more nodes are using this identity, release the ID for reuse.
-	// If deleteIdentity fails the identity will be removed by the periodic GC.
-	if len(identity.Status.Nodes) == 0 {
-		deleteIdentity(identity)
-	}
-}
-
 func startManagingK8sIdentities() {
+	identityHeartbeat = identity.NewIdentityHeartbeatStore(operatorOption.Config.IdentityHeartbeatTimeout)
+
 	identityStore = cache.NewStore(cache.DeletionHandlingMetaNamespaceKeyFunc)
 	identityInformer := informer.NewInformerWithStore(
 		cache.NewListWatchFromClient(ciliumK8sClient.CiliumV2().RESTClient(),
-			"ciliumidentities", v1.NamespaceAll, fields.Everything()),
+			v2.CIDPluralName, v1.NamespaceAll, fields.Everything()),
 		&v2.CiliumIdentity{},
 		0,
 		cache.ResourceEventHandlerFuncs{
-			UpdateFunc: func(oldObj, newObj interface{}) {
-				if identity, ok := newObj.(*types.Identity); ok {
-					handleIdentityUpdate(identity)
+			AddFunc: func(obj interface{}) {
+				if identity, ok := obj.(*v2.CiliumIdentity); ok {
+					// A new identity is always alive
+					identityHeartbeat.MarkAlive(identity.Name, time.Now())
 				}
 			},
+			UpdateFunc: func(oldObj, newObj interface{}) {
+				if oldIdty, ok := oldObj.(*v2.CiliumIdentity); ok {
+					if newIdty, ok := newObj.(*v2.CiliumIdentity); ok {
+						if oldIdty.DeepEqual(newIdty) {
+							return
+						}
+						// Any update to the identity marks it as alive
+						identityHeartbeat.MarkAlive(newIdty.Name, time.Now())
+					}
+				}
+			},
+			DeleteFunc: func(obj interface{}) {
+				identity, ok := obj.(*v2.CiliumIdentity)
+				if !ok {
+					deletedObj, ok := obj.(cache.DeletedFinalStateUnknown)
+					if ok {
+						identity, ok = deletedObj.Obj.(*v2.CiliumIdentity)
+					}
+					if !ok {
+						return
+					}
+				}
+				// When the identity is deleted, delete the
+				// heartbeat entry as well. This will not be
+				// 100% accurate as the CiliumEndpoint can live
+				// longer than the CiliumIdentity. See
+				// identityHeartbeat.GC()
+				identityHeartbeat.Delete(identity.Name)
+			},
 		},
-		types.ConvertToIdentity,
+		nil,
 		identityStore,
 	)
 

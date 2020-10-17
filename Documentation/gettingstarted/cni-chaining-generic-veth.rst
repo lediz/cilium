@@ -2,7 +2,7 @@
 
     WARNING: You are looking at unreleased Cilium documentation.
     Please use the official rendered version released here:
-    http://docs.cilium.io
+    https://docs.cilium.io
 
 *********************
 Generic Veth Chaining
@@ -79,8 +79,8 @@ Deploy Cilium release via Helm:
 
     helm install cilium |CHART_RELEASE| \\
       --namespace=kube-system \\
-      --set global.cni.chainingMode=generic-veth \\
-      --set global.cni.customConf=true \\
-      --set global.cni.configMap=cni-configuration \\
-      --set global.tunnel=disabled \\
-      --set global.masquerade=false
+      --set cni.chainingMode=generic-veth \\
+      --set cni.customConf=true \\
+      --set cni.configMap=cni-configuration \\
+      --set tunnel=disabled \\
+      --set masquerade=false

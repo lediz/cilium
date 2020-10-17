@@ -68,12 +68,14 @@ func (rule *HeaderRule) Matches(data interface{}) bool {
 
 // L7HeaderRuleParser parses protobuf L7 rules to and array of HeaderRules
 func L7HeaderRuleParser(rule *cilium.PortNetworkPolicyRule) []L7NetworkPolicyRule {
-	var rules []L7NetworkPolicyRule
 	l7Rules := rule.GetL7Rules()
 	if l7Rules == nil {
-		return rules
+		return nil
 	}
-	for _, l7Rule := range l7Rules.GetL7Rules() {
+
+	allowRules := l7Rules.GetL7AllowRules()
+	rules := make([]L7NetworkPolicyRule, 0, len(allowRules))
+	for _, l7Rule := range allowRules {
 		var hr HeaderRule
 		for k, v := range l7Rule.Rule {
 			switch k {
@@ -111,7 +113,7 @@ type HeaderParser struct {
 	connection *Connection
 }
 
-func (p *HeaderParserFactory) Create(connection *Connection) Parser {
+func (p *HeaderParserFactory) Create(connection *Connection) interface{} {
 	log.Debugf("HeaderParserFactory: Create: %v", connection)
 	return &HeaderParser{connection: connection}
 }

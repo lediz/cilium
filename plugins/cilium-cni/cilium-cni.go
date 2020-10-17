@@ -1,4 +1,4 @@
-// Copyright 2016-2019 Authors of Cilium
+// Copyright 2016-2020 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,20 +21,20 @@ import (
 	"os"
 	"runtime"
 	"sort"
-	"syscall"
 
 	"github.com/cilium/cilium/api/v1/models"
-	"github.com/cilium/cilium/common/addressing"
+	"github.com/cilium/cilium/pkg/addressing"
 	"github.com/cilium/cilium/pkg/client"
+	"github.com/cilium/cilium/pkg/datapath/connector"
 	"github.com/cilium/cilium/pkg/datapath/linux/route"
+	datapathOption "github.com/cilium/cilium/pkg/datapath/option"
 	"github.com/cilium/cilium/pkg/defaults"
-	"github.com/cilium/cilium/pkg/endpoint/connector"
 	endpointid "github.com/cilium/cilium/pkg/endpoint/id"
+	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/netns"
-	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/sysctl"
 	"github.com/cilium/cilium/pkg/uuid"
 	"github.com/cilium/cilium/pkg/version"
@@ -54,7 +54,6 @@ import (
 	gops "github.com/google/gops/agent"
 	"github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
-
 	"golang.org/x/sys/unix"
 )
 
@@ -78,10 +77,6 @@ type CmdState struct {
 }
 
 func main() {
-	if err := gops.Listen(gops.Options{}); err != nil {
-		log.WithError(err).Warn("Unable to start gops")
-	}
-
 	skel.PluginMain(cmdAdd,
 		nil,
 		cmdDel,
@@ -121,11 +116,6 @@ func releaseIP(client *client.Client, ip string) {
 	}
 }
 
-func releaseIPs(client *client.Client, addr *models.AddressPair) {
-	releaseIP(client, addr.IPV6)
-	releaseIP(client, addr.IPV4)
-}
-
 func addIPConfigToLink(ip addressing.CiliumIP, routes []route.Route, link netlink.Link, ifName string) error {
 	log.WithFields(logrus.Fields{
 		logfields.IPAddr:    ip,
@@ -135,7 +125,7 @@ func addIPConfigToLink(ip addressing.CiliumIP, routes []route.Route, link netlin
 
 	addr := &netlink.Addr{IPNet: ip.EndpointPrefix()}
 	if ip.IsIPv6() {
-		addr.Flags = syscall.IFA_F_NODAD
+		addr.Flags = unix.IFA_F_NODAD
 	}
 	if err := netlink.AddrAdd(link, addr); err != nil {
 		return fmt.Errorf("failed to add addr to %q: %v", ifName, err)
@@ -292,14 +282,15 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	}
 	if !n.EnableDebug {
 		logger.Logger.SetLevel(logrus.InfoLevel)
+	} else {
+		if err := gops.Listen(gops.Options{}); err != nil {
+			log.WithError(err).Warn("Unable to start gops")
+		} else {
+			defer gops.Close()
+		}
 	}
 	logger.Debugf("Processing CNI ADD request %#v", args)
 
-	n, err = types.LoadNetConf(args.StdinData)
-	if err != nil {
-		err = fmt.Errorf("unable to parse CNI configuration \"%s\": %s", args.StdinData, err)
-		return
-	}
 	logger.Debugf("CNI NetConf: %#v", n)
 	if n.PrevResult != nil {
 		logger.Debugf("CNI Previous result: %#v", n.PrevResult)
@@ -386,7 +377,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	}
 
 	switch conf.DatapathMode {
-	case option.DatapathModeVeth:
+	case datapathOption.DatapathModeVeth:
 		var (
 			veth      *netlink.Veth
 			peer      *netlink.Link
@@ -415,7 +406,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 			err = fmt.Errorf("unable to set up veth on container side: %s", err)
 			return
 		}
-	case option.DatapathModeIpvlan:
+	case datapathOption.DatapathModeIpvlan:
 		ipvlanConf := *conf.IpvlanConfiguration
 		index := int(ipvlanConf.MasterDeviceIndex)
 
@@ -432,7 +423,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	}
 
 	podName := string(cniArgs.K8S_POD_NAMESPACE) + "/" + string(cniArgs.K8S_POD_NAME)
-	ipam, err = c.IPAMAllocate("", podName)
+	ipam, err = c.IPAMAllocate("", podName, true)
 	if err != nil {
 		err = fmt.Errorf("unable to allocate IP via local cilium agent: %s", err)
 		return
@@ -471,6 +462,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 
 	if ipv6IsEnabled(ipam) {
 		ep.Addressing.IPV6 = ipam.Address.IPV6
+		ep.Addressing.IPV6ExpirationUUID = ipam.IPV6.ExpirationUUID
 
 		ipConfig, routes, err = prepareIP(ep.Addressing.IPV6, true, &state, int(conf.RouteMTU))
 		if err != nil {
@@ -483,6 +475,7 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 
 	if ipv4IsEnabled(ipam) {
 		ep.Addressing.IPV4 = ipam.Address.IPV4
+		ep.Addressing.IPV4ExpirationUUID = ipam.IPV4.ExpirationUUID
 
 		ipConfig, routes, err = prepareIP(ep.Addressing.IPV4, false, &state, int(conf.RouteMTU))
 		if err != nil {
@@ -491,13 +484,14 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 		}
 		res.IPs = append(res.IPs, ipConfig)
 		res.Routes = append(res.Routes, routes...)
+	}
 
-		if conf.IpamMode == option.IPAMENI {
-			err = eniAdd(ipConfig, ipam.IPV4, conf)
-			if err != nil {
-				err = fmt.Errorf("unable to setup ENI datapath: %s", err)
-				return
-			}
+	switch conf.IpamMode {
+	case ipamOption.IPAMENI, ipamOption.IPAMAzure:
+		err = interfaceAdd(ipConfig, ipam.IPV4, conf)
+		if err != nil {
+			err = fmt.Errorf("unable to setup interface datapath: %s", err)
+			return
 		}
 	}
 
@@ -518,8 +512,13 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	res.Interfaces = append(res.Interfaces, &cniTypesVer.Interface{
 		Name:    args.IfName,
 		Mac:     macAddrStr,
-		Sandbox: "/proc/" + args.Netns + "/ns/net",
+		Sandbox: args.Netns,
 	})
+
+	// Add to the result the Interface as index of Interfaces
+	for i := range res.Interfaces {
+		res.IPs[i].Interface = cniTypesVer.Int(i)
+	}
 
 	// Specify that endpoint must be regenerated synchronously. See GH-4409.
 	ep.SyncBuildEndpoint = true
@@ -556,6 +555,12 @@ func cmdDel(args *skel.CmdArgs) error {
 	}
 	if !n.EnableDebug {
 		logger.Logger.SetLevel(logrus.InfoLevel)
+	} else {
+		if err := gops.Listen(gops.Options{}); err != nil {
+			log.WithError(err).Warn("Unable to start gops")
+		} else {
+			defer gops.Close()
+		}
 	}
 	logger.Debugf("Processing CNI DEL request %#v", args)
 
@@ -602,20 +607,6 @@ func cmdDel(args *skel.CmdArgs) error {
 		//                         the endpoint is always deleted though, no
 		//                         need to retry
 		log.WithError(err).Warning("Errors encountered while deleting endpoint")
-
-		// Endpoint deletion has failed. We can't be sure whether the
-		// CNI ADD was interrupted in between the IP allocation and the
-		// endpoint creation. In order to guarantee to never leak IP
-		// addresses, delete any IP addresses associated with the pod
-		// being deleted. This task is only done manually on endpoint
-		// delete failure as all IPs of an endpoint are released when
-		// the endpoint is deleted.
-		log.Info("Releasing IPs manually due to inability to delete endpoint")
-		podName := string(cniArgs.K8S_POD_NAMESPACE) + "/" + string(cniArgs.K8S_POD_NAME)
-		err = c.IPAMReleaseIP(podName)
-		if err != nil {
-			log.WithError(err).WithField("pod", podName).Warning("Unable to manually release IPs of pod")
-		}
 	}
 
 	netNs, err := ns.GetNS(args.Netns)

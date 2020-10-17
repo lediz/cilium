@@ -21,6 +21,7 @@ import (
 
 	"github.com/cilium/cilium/pkg/completion"
 	"github.com/cilium/cilium/pkg/datapath"
+	"github.com/cilium/cilium/pkg/fqdn/restore"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/identity/cache"
 	"github.com/cilium/cilium/pkg/identity/identitymanager"
@@ -28,6 +29,7 @@ import (
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/lock"
 	monitorAPI "github.com/cilium/cilium/pkg/monitor/api"
+	fakeConfig "github.com/cilium/cilium/pkg/option/fake"
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/policy/trafficdirection"
 	"github.com/cilium/cilium/pkg/proxy/logger"
@@ -107,14 +109,26 @@ func (d *DummyOwner) GetCompilationLock() *lock.RWMutex {
 	return nil
 }
 
+// GetCIDRPrefixLengths does nothing.
+func (d *DummyOwner) GetCIDRPrefixLengths() (s6, s4 []int) {
+	return nil, nil
+}
+
 // SendNotification does nothing.
-func (d *DummyOwner) SendNotification(typ monitorAPI.AgentNotification, text string) error {
+func (d *DummyOwner) SendNotification(msg monitorAPI.AgentNotifyMessage) error {
 	return nil
 }
 
 // Datapath returns a nil datapath.
 func (d *DummyOwner) Datapath() datapath.Datapath {
 	return nil
+}
+
+func (s *DummyOwner) GetDNSRules(epID uint16) restore.DNSRules {
+	return nil
+}
+
+func (s *DummyOwner) RemoveRestoredDNSRules(epID uint16) {
 }
 
 // GetNodeSuffix does nothing.
@@ -128,9 +142,9 @@ func (d *DummyOwner) UpdateIdentities(added, deleted cache.IdentityCache) {}
 func (s *RedirectSuite) TestAddVisibilityRedirects(c *check.C) {
 	// Setup dependencies for endpoint.
 	kvstore.SetupDummy("etcd")
-	defer kvstore.Close()
+	defer kvstore.Client().Close()
 
-	identity.InitWellKnownIdentities()
+	identity.InitWellKnownIdentities(&fakeConfig.Config{})
 	idAllocatorOwner := &DummyIdentityAllocatorOwner{}
 
 	mgr := cache.NewCachingIdentityAllocator(idAllocatorOwner)

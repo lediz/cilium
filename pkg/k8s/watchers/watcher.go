@@ -16,28 +16,34 @@ package watchers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/cilium/cilium/pkg/cidr"
 	"github.com/cilium/cilium/pkg/controller"
+	"github.com/cilium/cilium/pkg/datapath"
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/k8s"
 	k8smetrics "github.com/cilium/cilium/pkg/k8s/metrics"
+	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/core/v1"
+	"github.com/cilium/cilium/pkg/k8s/utils"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/metrics"
-	"github.com/cilium/cilium/pkg/node"
+	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/policy/api"
-	"github.com/cilium/cilium/pkg/serializer"
+	"github.com/cilium/cilium/pkg/redirectpolicy"
 
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/util/runtime"
@@ -51,13 +57,13 @@ const (
 	k8sAPIGroupNamespaceV1Core                  = "core/v1::Namespace"
 	K8sAPIGroupServiceV1Core                    = "core/v1::Service"
 	K8sAPIGroupEndpointV1Core                   = "core/v1::Endpoint"
-	k8sAPIGroupPodV1Core                        = "core/v1::Pods"
+	K8sAPIGroupPodV1Core                        = "core/v1::Pods"
 	k8sAPIGroupNetworkingV1Core                 = "networking.k8s.io/v1::NetworkPolicy"
 	k8sAPIGroupCiliumNetworkPolicyV2            = "cilium/v2::CiliumNetworkPolicy"
 	k8sAPIGroupCiliumClusterwideNetworkPolicyV2 = "cilium/v2::CiliumClusterwideNetworkPolicy"
 	k8sAPIGroupCiliumNodeV2                     = "cilium/v2::CiliumNode"
 	k8sAPIGroupCiliumEndpointV2                 = "cilium/v2::CiliumEndpoint"
-	cacheSyncTimeout                            = 3 * time.Minute
+	k8sAPIGroupCiliumLocalRedirectPolicyV2      = "cilium/v2::CiliumLocalRedirectPolicy"
 	K8sAPIGroupEndpointSliceV1Beta1Discovery    = "discovery/v1beta1::EndpointSlice"
 
 	metricCNP            = "CiliumNetworkPolicy"
@@ -68,11 +74,15 @@ const (
 	metricNS             = "Namespace"
 	metricCiliumNode     = "CiliumNode"
 	metricCiliumEndpoint = "CiliumEndpoint"
+	metricCLRP           = "CiliumLocalRedirectPolicy"
 	metricPod            = "Pod"
+	metricNode           = "Node"
 	metricService        = "Service"
 	metricCreate         = "create"
 	metricDelete         = "delete"
 	metricUpdate         = "update"
+
+	k8sPodResource = "pod"
 )
 
 func init() {
@@ -81,8 +91,13 @@ func init() {
 		k8s.K8sErrorHandler,
 	}
 
-	k8sMetric := &k8sMetrics{}
-	k8s_metrics.Register(k8sMetric, k8sMetric)
+	k8s_metrics.Register(k8s_metrics.RegisterOpts{
+		ClientCertExpiry:      nil,
+		ClientCertRotationAge: nil,
+		RequestLatency:        &k8sMetrics{},
+		RateLimiterLatency:    nil,
+		RequestResult:         &k8sMetrics{},
+	})
 }
 
 var (
@@ -99,13 +114,14 @@ var (
 
 type endpointManager interface {
 	GetEndpoints() []*endpoint.Endpoint
+	GetHostEndpoint() *endpoint.Endpoint
 	LookupPodName(string) *endpoint.Endpoint
 	WaitForEndpointsAtPolicyRev(ctx context.Context, rev uint64) error
 }
 
 type nodeDiscoverManager interface {
-	NodeDeleted(n node.Node)
-	NodeUpdated(n node.Node)
+	NodeDeleted(n nodeTypes.Node)
+	NodeUpdated(n nodeTypes.Node)
 	ClusterSizeDependantInterval(baseInterval time.Duration) time.Duration
 }
 
@@ -121,9 +137,17 @@ type policyRepository interface {
 
 type svcManager interface {
 	DeleteService(frontend loadbalancer.L3n4Addr) (bool, error)
-	UpsertService(frontend loadbalancer.L3n4AddrID, backends []loadbalancer.Backend,
-		svcType loadbalancer.SVCType, svcTrafficPolicy loadbalancer.SVCTrafficPolicy,
-		svcHealthCheckNodePort uint16, svcName, svcNamespace string) (bool, loadbalancer.ID, error)
+	UpsertService(*loadbalancer.SVC) (bool, loadbalancer.ID, error)
+}
+
+type redirectPolicyManager interface {
+	AddRedirectPolicy(config redirectpolicy.LRPConfig, podStore cache.Store) (bool, error)
+	DeleteRedirectPolicy(config redirectpolicy.LRPConfig) error
+	OnAddService(svcID k8s.ServiceID, podStore cache.Store)
+	OnDeleteService(svcID k8s.ServiceID)
+	OnUpdatePod(pod *slim_corev1.Pod, needsReassign bool, ready bool)
+	OnDeletePod(pod *slim_corev1.Pod)
+	OnAddPod(pod *slim_corev1.Pod)
 }
 
 type K8sWatcher struct {
@@ -148,10 +172,11 @@ type K8sWatcher struct {
 
 	endpointManager endpointManager
 
-	nodeDiscoverManager nodeDiscoverManager
-	policyManager       policyManager
-	policyRepository    policyRepository
-	svcManager          svcManager
+	nodeDiscoverManager   nodeDiscoverManager
+	policyManager         policyManager
+	policyRepository      policyRepository
+	svcManager            svcManager
+	redirectPolicyManager redirectPolicyManager
 
 	// controllersStarted is a channel that is closed when all controllers, i.e.,
 	// k8s watchers have started listening for k8s events.
@@ -165,6 +190,9 @@ type K8sWatcher struct {
 	podStoreOnce sync.Once
 
 	namespaceStore cache.Store
+	datapath       datapath.Datapath
+
+	networkpolicyStore cache.Store
 }
 
 func NewK8sWatcher(
@@ -173,11 +201,13 @@ func NewK8sWatcher(
 	policyManager policyManager,
 	policyRepository policyRepository,
 	svcManager svcManager,
+	datapath datapath.Datapath,
+	redirectPolicyManager redirectPolicyManager,
 ) *K8sWatcher {
 	return &K8sWatcher{
 		k8sResourceSynced:         map[string]<-chan struct{}{},
 		k8sResourceSyncedStopWait: map[string]bool{},
-		K8sSvcCache:               k8s.NewServiceCache(),
+		K8sSvcCache:               k8s.NewServiceCache(datapath.LocalNodeAddressing()),
 		endpointManager:           endpointManager,
 		nodeDiscoverManager:       nodeDiscoverManager,
 		policyManager:             policyManager,
@@ -185,6 +215,8 @@ func NewK8sWatcher(
 		svcManager:                svcManager,
 		controllersStarted:        make(chan struct{}),
 		podStoreSet:               make(chan struct{}),
+		datapath:                  datapath,
+		redirectPolicyManager:     redirectPolicyManager,
 	}
 }
 
@@ -230,7 +262,18 @@ func (*k8sMetrics) Observe(verb string, u url.URL, latency time.Duration) {
 }
 
 func (*k8sMetrics) Increment(code string, method string, host string) {
-	metrics.KubernetesAPICalls.WithLabelValues(host, method, code).Inc()
+	metrics.KubernetesAPICalls.WithLabelValues(host, method, code).Inc() //TODO(sayboras): Remove deprecated metric in 1.10
+	metrics.KubernetesAPICallsTotal.WithLabelValues(host, method, code).Inc()
+	// The 'code' is set to '<error>' in case an error is returned from k8s
+	// more info:
+	// https://github.com/kubernetes/client-go/blob/v0.18.0-rc.1/rest/request.go#L700-L703
+	if code != "<error>" {
+		// Consider success if status code is 2xx or 4xx
+		if strings.HasPrefix(code, "2") ||
+			strings.HasPrefix(code, "4") {
+			k8smetrics.LastSuccessInteraction.Reset()
+		}
+	}
 	k8smetrics.LastInteraction.Reset()
 }
 
@@ -253,7 +296,7 @@ func (k *K8sWatcher) cancelWaitGroupToSyncResources(resourceName string) {
 func (k *K8sWatcher) blockWaitGroupToSyncResources(
 	stop <-chan struct{},
 	swg *lock.StoppableWaitGroup,
-	informer cache.Controller,
+	hasSyncedFunc cache.InformerSynced,
 	resourceName string,
 ) {
 
@@ -264,7 +307,7 @@ func (k *K8sWatcher) blockWaitGroupToSyncResources(
 	go func() {
 		scopedLog := log.WithField("kubernetesResource", resourceName)
 		scopedLog.Debug("waiting for cache to synchronize")
-		if ok := cache.WaitForCacheSync(stop, informer.HasSynced); !ok {
+		if ok := cache.WaitForCacheSync(stop, hasSyncedFunc); !ok {
 			select {
 			case <-stop:
 				// do not fatal if the channel was stopped
@@ -288,8 +331,10 @@ func (k *K8sWatcher) blockWaitGroupToSyncResources(
 			k.k8sResourceSyncedStopWait[resourceName] = true
 			k.k8sResourceSyncedMu.Unlock()
 		}
-		swg.Stop()
-		swg.Wait()
+		if swg != nil {
+			swg.Stop()
+			swg.Wait()
+		}
 		close(ch)
 	}()
 }
@@ -326,16 +371,39 @@ func (k *K8sWatcher) WaitForCacheSync(resourceNames ...string) {
 	}
 }
 
+// WaitForCRDsToRegister will wait for the Cilium Operator to register the CRDs
+// with the apiserver. This step is required before launching the full K8s
+// watcher, as those resource controllers need the resources to be registered
+// with K8s first.
+func (k *K8sWatcher) WaitForCRDsToRegister(ctx context.Context) error {
+	return k.crdsInit(ctx, k8s.APIExtClient())
+}
+
 // InitK8sSubsystem returns a channel for which it will be closed when all
 // caches essential for daemon are synchronized.
-func (k *K8sWatcher) InitK8sSubsystem() <-chan struct{} {
-	if err := k.EnableK8sWatcher(option.Config.K8sWatcherQueueSize); err != nil {
-		log.WithError(err).Fatal("Unable to establish connection to Kubernetes apiserver")
+func (k *K8sWatcher) InitK8sSubsystem(ctx context.Context) <-chan struct{} {
+	cachesSynced := make(chan struct{})
+	if err := k.EnableK8sWatcher(ctx); err != nil {
+		if !errors.Is(err, context.Canceled) {
+			log.WithError(err).Fatal("Unable to start K8s watchers for Cilium")
+		}
+		// If the context was canceled it means the daemon is being stopped
+		// so we can return a non-closed channel.
+		return cachesSynced
 	}
 
-	cachesSynced := make(chan struct{})
-
 	go func() {
+		// Ensure that we have the CRDs installed first before waiting on the
+		// other resources below.
+		k.WaitForCacheSync(
+			cnpCRD,
+			ccnpCRD,
+			cepCRD,
+			cnCRD,
+			cidCRD,
+			clrpCRD,
+		)
+
 		log.Info("Waiting until all pre-existing resources related to policy have been received")
 		// Wait only for certain caches, but not all!
 		// We don't wait for nodes synchronization.
@@ -346,6 +414,7 @@ func (k *K8sWatcher) InitK8sSubsystem() <-chan struct{} {
 			// To perform the service translation and have the BPF LB datapath
 			// with the right service -> backend (k8s endpoints) translation.
 			K8sAPIGroupEndpointV1Core,
+			K8sAPIGroupEndpointSliceV1Beta1Discovery,
 			// We need all network policies in place before restoring to make sure
 			// we are enforcing the correct policies for each endpoint before
 			// restarting.
@@ -363,7 +432,10 @@ func (k *K8sWatcher) InitK8sSubsystem() <-chan struct{} {
 			k8sAPIGroupNamespaceV1Core,
 			// Pods can contain labels which are essential for endpoints
 			// being restored to have the right identity.
-			k8sAPIGroupPodV1Core,
+			K8sAPIGroupPodV1Core,
+			// We need to know about active local redirect policy services
+			// before BPF LB datapath is synced.
+			k8sAPIGroupCiliumLocalRedirectPolicyV2,
 		)
 		// CiliumEndpoint is used to synchronize the ipcache, wait for
 		// it unless it is disabled
@@ -377,7 +449,7 @@ func (k *K8sWatcher) InitK8sSubsystem() <-chan struct{} {
 		select {
 		case <-cachesSynced:
 			log.Info("All pre-existing resources related to policy have been received; continuing")
-		case <-time.After(cacheSyncTimeout):
+		case <-time.After(option.Config.K8sSyncTimeout):
 			log.Fatalf("Timed out waiting for pre-existing resources related to policy to be received; exiting")
 		}
 	}()
@@ -387,75 +459,78 @@ func (k *K8sWatcher) InitK8sSubsystem() <-chan struct{} {
 
 // EnableK8sWatcher watches for policy, services and endpoint changes on the Kubernetes
 // api server defined in the receiver's daemon k8sClient.
-// queueSize specifies the queue length used to serialize k8s events.
-func (k *K8sWatcher) EnableK8sWatcher(queueSize uint) error {
+func (k *K8sWatcher) EnableK8sWatcher(ctx context.Context) error {
 	if !k8s.IsEnabled() {
 		log.Debug("Not enabling k8s event listener because k8s is not enabled")
 		return nil
 	}
 	log.Info("Enabling k8s event listener")
 
-	k.k8sAPIGroups.addAPI(k8sAPIGroupCRD)
-
 	ciliumNPClient := k8s.CiliumClient()
 	asyncControllers := &sync.WaitGroup{}
 
 	// kubernetes network policies
-	serKNPs := serializer.NewFunctionQueue(queueSize)
 	swgKNP := lock.NewStoppableWaitGroup()
-	k.networkPoliciesInit(k8s.Client(), serKNPs, swgKNP)
+	k.networkPoliciesInit(k8s.WatcherClient(), swgKNP)
+
+	serviceOptModifier, err := utils.GetServiceListOptionsModifier()
+	if err != nil {
+		return fmt.Errorf("error creating service list option modifier: %w", err)
+	}
 
 	// kubernetes services
-	serSvcs := serializer.NewFunctionQueue(queueSize)
 	swgSvcs := lock.NewStoppableWaitGroup()
-	k.servicesInit(k8s.Client(), serSvcs, swgSvcs)
+	k.servicesInit(k8s.WatcherClient(), swgSvcs, serviceOptModifier)
 
 	// kubernetes endpoints
-	serEps := serializer.NewFunctionQueue(queueSize)
 	swgEps := lock.NewStoppableWaitGroup()
 
 	// We only enable either "Endpoints" or "EndpointSlice"
 	switch {
 	case k8s.SupportsEndpointSlice():
-		connected := k.endpointSlicesInit(k8s.Client(), serEps, swgEps)
-		// the cluster has endpoint slices so we should not check for v1.Endpoints
+		// We don't add the service option modifier here, as endpointslices do not
+		// mirror service proxy name label present in the corresponding service.
+		connected := k.endpointSlicesInit(k8s.WatcherClient(), swgEps)
+		// The cluster has endpoint slices so we should not check for v1.Endpoints
 		if connected {
 			break
 		}
 		fallthrough
 	default:
-		k.endpointsInit(k8s.Client(), serEps, swgEps)
+		k.endpointsInit(k8s.WatcherClient(), swgEps, serviceOptModifier)
 	}
 
 	// cilium network policies
-	serCNPs := serializer.NewFunctionQueue(queueSize)
-	swgCNPs := lock.NewStoppableWaitGroup()
-	k.ciliumNetworkPoliciesInit(ciliumNPClient, serCNPs, swgCNPs)
+	k.ciliumNetworkPoliciesInit(ciliumNPClient)
 
 	// cilium clusterwide network policy
-	serCCNPs := serializer.NewFunctionQueue(queueSize)
-	swgCCNPs := lock.NewStoppableWaitGroup()
-	k.ciliumClusterwideNetworkPoliciesInit(ciliumNPClient, serCCNPs, swgCCNPs)
+	k.ciliumClusterwideNetworkPoliciesInit(ciliumNPClient)
 
 	// cilium nodes
 	asyncControllers.Add(1)
-	serNodes := serializer.NewFunctionQueue(queueSize)
-	go k.ciliumNodeInit(ciliumNPClient, serNodes, asyncControllers)
+	go k.ciliumNodeInit(ciliumNPClient, asyncControllers)
 
 	// cilium endpoints
-	asyncControllers.Add(1)
-	serCiliumEndpoints := serializer.NewFunctionQueue(queueSize)
-	go k.ciliumEndpointsInit(ciliumNPClient, serCiliumEndpoints, asyncControllers)
+	// Don't watch for CiliumEndpoints to avoid populating ipcache with dangling
+	// CiliumEndpoints.
+	if !option.Config.DisableCiliumEndpointCRD {
+		asyncControllers.Add(1)
+		go k.ciliumEndpointsInit(ciliumNPClient, asyncControllers)
+	}
+
+	// cilium local redirect policies
+	go k.ciliumLocalRedirectPolicyInit(ciliumNPClient)
 
 	// kubernetes pods
 	asyncControllers.Add(1)
-	serPods := serializer.NewFunctionQueue(queueSize)
-	go k.podsInit(k8s.Client(), serPods, asyncControllers)
+	go k.podsInit(k8s.WatcherClient(), asyncControllers)
+
+	// kubernetes nodes
+	k.nodesInit(k8s.WatcherClient())
 
 	// kubernetes namespaces
 	asyncControllers.Add(1)
-	serNamespaces := serializer.NewFunctionQueue(queueSize)
-	go k.namespacesInit(k8s.Client(), serNamespaces, asyncControllers)
+	go k.namespacesInit(k8s.WatcherClient(), asyncControllers)
 
 	asyncControllers.Wait()
 	close(k.controllersStarted)
@@ -561,19 +636,27 @@ func (k *K8sWatcher) delK8sSVCs(svc k8s.ServiceID, svcInfo *k8s.Service, se *k8s
 		}
 		repPorts[svcPort.Port] = false
 
-		fe := loadbalancer.NewL3n4Addr(svcPort.Protocol, svcInfo.FrontendIP, svcPort.Port)
+		fe := loadbalancer.NewL3n4Addr(svcPort.Protocol, svcInfo.FrontendIP, svcPort.Port, loadbalancer.ScopeExternal)
 		frontends = append(frontends, fe)
 
 		for _, nodePortFE := range svcInfo.NodePorts[portName] {
 			frontends = append(frontends, &nodePortFE.L3n4Addr)
+			if svcInfo.TrafficPolicy == loadbalancer.SVCTrafficPolicyLocal {
+				cpFE := nodePortFE.L3n4Addr.DeepCopy()
+				cpFE.Scope = loadbalancer.ScopeInternal
+				frontends = append(frontends, cpFE)
+			}
 		}
 
 		for _, k8sExternalIP := range svcInfo.K8sExternalIPs {
-			frontends = append(frontends, loadbalancer.NewL3n4Addr(svcPort.Protocol, k8sExternalIP, svcPort.Port))
+			frontends = append(frontends, loadbalancer.NewL3n4Addr(svcPort.Protocol, k8sExternalIP, svcPort.Port, loadbalancer.ScopeExternal))
 		}
 
 		for _, ip := range svcInfo.LoadBalancerIPs {
-			frontends = append(frontends, loadbalancer.NewL3n4Addr(svcPort.Protocol, ip, svcPort.Port))
+			frontends = append(frontends, loadbalancer.NewL3n4Addr(svcPort.Protocol, ip, svcPort.Port, loadbalancer.ScopeExternal))
+			if svcInfo.TrafficPolicy == loadbalancer.SVCTrafficPolicyLocal {
+				frontends = append(frontends, loadbalancer.NewL3n4Addr(svcPort.Protocol, ip, svcPort.Port, loadbalancer.ScopeInternal))
+			}
 		}
 	}
 
@@ -592,12 +675,23 @@ func (k *K8sWatcher) delK8sSVCs(svc k8s.ServiceID, svcInfo *k8s.Service, se *k8s
 
 func genCartesianProduct(
 	fe net.IP,
+	svcTrafficPolicy loadbalancer.SVCTrafficPolicy,
 	svcType loadbalancer.SVCType,
 	ports map[loadbalancer.FEPortName]*loadbalancer.L4Addr,
 	bes *k8s.Endpoints,
 ) []loadbalancer.SVC {
+	var svcSize int
 
-	var svcs []loadbalancer.SVC
+	// For externalTrafficPolicy=Local we add both external and internal
+	// scoped frontends, hence twice the size for only this case.
+	if svcTrafficPolicy == loadbalancer.SVCTrafficPolicyLocal &&
+		(svcType == loadbalancer.SVCTypeLoadBalancer || svcType == loadbalancer.SVCTypeNodePort) {
+		svcSize = len(ports) * 2
+	} else {
+		svcSize = len(ports)
+	}
+
+	svcs := make([]loadbalancer.SVC, 0, svcSize)
 
 	for fePortName, fePort := range ports {
 		var besValues []loadbalancer.Backend
@@ -612,6 +706,7 @@ func genCartesianProduct(
 			}
 		}
 
+		// External scoped entry.
 		svcs = append(svcs,
 			loadbalancer.SVC{
 				Frontend: loadbalancer.L3n4AddrID{
@@ -621,12 +716,33 @@ func genCartesianProduct(
 							Protocol: fePort.Protocol,
 							Port:     fePort.Port,
 						},
+						Scope: loadbalancer.ScopeExternal,
 					},
 					ID: loadbalancer.ID(0),
 				},
 				Backends: besValues,
 				Type:     svcType,
 			})
+
+		// Internal scoped entry only for Local traffic policy.
+		if svcSize > len(ports) {
+			svcs = append(svcs,
+				loadbalancer.SVC{
+					Frontend: loadbalancer.L3n4AddrID{
+						L3n4Addr: loadbalancer.L3n4Addr{
+							IP: fe,
+							L4Addr: loadbalancer.L4Addr{
+								Protocol: fePort.Protocol,
+								Port:     fePort.Port,
+							},
+							Scope: loadbalancer.ScopeInternal,
+						},
+						ID: loadbalancer.ID(0),
+					},
+					Backends: besValues,
+					Type:     svcType,
+				})
+		}
 	}
 	return svcs
 }
@@ -644,16 +760,16 @@ func datapathSVCs(svc *k8s.Service, endpoints *k8s.Endpoints) (svcs []loadbalanc
 		clusterIPPorts[fePortName] = fePort
 	}
 	if svc.FrontendIP != nil {
-		dpSVC := genCartesianProduct(svc.FrontendIP, loadbalancer.SVCTypeClusterIP, clusterIPPorts, endpoints)
+		dpSVC := genCartesianProduct(svc.FrontendIP, svc.TrafficPolicy, loadbalancer.SVCTypeClusterIP, clusterIPPorts, endpoints)
 		svcs = append(svcs, dpSVC...)
 	}
 	for _, ip := range svc.LoadBalancerIPs {
-		dpSVC := genCartesianProduct(ip, loadbalancer.SVCTypeLoadBalancer, clusterIPPorts, endpoints)
+		dpSVC := genCartesianProduct(ip, svc.TrafficPolicy, loadbalancer.SVCTypeLoadBalancer, clusterIPPorts, endpoints)
 		svcs = append(svcs, dpSVC...)
 	}
 
 	for _, k8sExternalIP := range svc.K8sExternalIPs {
-		dpSVC := genCartesianProduct(k8sExternalIP, loadbalancer.SVCTypeExternalIPs, clusterIPPorts, endpoints)
+		dpSVC := genCartesianProduct(k8sExternalIP, svc.TrafficPolicy, loadbalancer.SVCTypeExternalIPs, clusterIPPorts, endpoints)
 		svcs = append(svcs, dpSVC...)
 	}
 
@@ -662,15 +778,25 @@ func datapathSVCs(svc *k8s.Service, endpoints *k8s.Endpoints) (svcs []loadbalanc
 			nodePortPorts := map[loadbalancer.FEPortName]*loadbalancer.L4Addr{
 				fePortName: &nodePortFE.L4Addr,
 			}
-			dpSVC := genCartesianProduct(nodePortFE.IP, loadbalancer.SVCTypeNodePort, nodePortPorts, endpoints)
+			dpSVC := genCartesianProduct(nodePortFE.IP, svc.TrafficPolicy, loadbalancer.SVCTypeNodePort, nodePortPorts, endpoints)
 			svcs = append(svcs, dpSVC...)
 		}
+	}
+
+	lbSrcRanges := make([]*cidr.CIDR, 0, len(svc.LoadBalancerSourceRanges))
+	for _, cidr := range svc.LoadBalancerSourceRanges {
+		lbSrcRanges = append(lbSrcRanges, cidr)
 	}
 
 	// apply common service properties
 	for i := range svcs {
 		svcs[i].TrafficPolicy = svc.TrafficPolicy
 		svcs[i].HealthCheckNodePort = svc.HealthCheckNodePort
+		svcs[i].SessionAffinity = svc.SessionAffinity
+		svcs[i].SessionAffinityTimeoutSec = svc.SessionAffinityTimeoutSec
+		if svcs[i].Type == loadbalancer.SVCTypeLoadBalancer {
+			svcs[i].LoadBalancerSourceRanges = lbSrcRanges
+		}
 	}
 
 	return svcs
@@ -728,8 +854,19 @@ func (k *K8sWatcher) addK8sSVCs(svcID k8s.ServiceID, oldSvc, svc *k8s.Service, e
 	}
 
 	for _, dpSvc := range svcs {
-		if _, _, err := k.svcManager.UpsertService(dpSvc.Frontend, dpSvc.Backends, dpSvc.Type,
-			dpSvc.TrafficPolicy, dpSvc.HealthCheckNodePort, svcID.Name, svcID.Namespace); err != nil {
+		p := &loadbalancer.SVC{
+			Frontend:                  dpSvc.Frontend,
+			Backends:                  dpSvc.Backends,
+			Type:                      dpSvc.Type,
+			TrafficPolicy:             dpSvc.TrafficPolicy,
+			SessionAffinity:           dpSvc.SessionAffinity,
+			SessionAffinityTimeoutSec: dpSvc.SessionAffinityTimeoutSec,
+			HealthCheckNodePort:       dpSvc.HealthCheckNodePort,
+			LoadBalancerSourceRanges:  dpSvc.LoadBalancerSourceRanges,
+			Name:                      svcID.Name,
+			Namespace:                 svcID.Namespace,
+		}
+		if _, _, err := k.svcManager.UpsertService(p); err != nil {
 			scopedLog.WithError(err).Error("Error while inserting service in LB map")
 		}
 	}
@@ -753,4 +890,23 @@ func (k *K8sWatcher) K8sEventReceived(scope string, action string, valid, equal 
 	k8smetrics.LastInteraction.Reset()
 
 	metrics.KubernetesEventReceived.WithLabelValues(scope, action, strconv.FormatBool(valid), strconv.FormatBool(equal)).Inc()
+}
+
+// GetStore returns the k8s cache store for the given resource name.
+func (k *K8sWatcher) GetStore(name string) cache.Store {
+	switch name {
+	case "networkpolicy":
+		return k.networkpolicyStore
+	case "namespace":
+		return k.namespaceStore
+	case k8sPodResource:
+		// Wait for podStore to get initialized.
+		<-k.podStoreSet
+		// Access to podStore is protected by podStoreMU.
+		k.podStoreMU.RLock()
+		defer k.podStoreMU.RUnlock()
+		return k.podStore
+	default:
+		return nil
+	}
 }

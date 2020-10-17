@@ -22,6 +22,9 @@ type CreateEgressOnlyInternetGatewayInput struct {
 	// it is UnauthorizedOperation.
 	DryRun *bool `type:"boolean"`
 
+	// The tags to assign to the egress-only internet gateway.
+	TagSpecifications []TagSpecification `locationName:"TagSpecification" locationNameList:"item" type:"list"`
+
 	// The ID of the VPC for which to create the egress-only internet gateway.
 	//
 	// VpcId is a required field
@@ -93,6 +96,7 @@ func (c *Client) CreateEgressOnlyInternetGatewayRequest(input *CreateEgressOnlyI
 	}
 
 	req := c.newRequest(op, input, &CreateEgressOnlyInternetGatewayOutput{})
+
 	return CreateEgressOnlyInternetGatewayRequest{Request: req, Input: input, Copy: c.CreateEgressOnlyInternetGatewayRequest}
 }
 

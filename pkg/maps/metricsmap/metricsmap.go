@@ -1,4 +1,4 @@
-// Copyright 2016-2019 Authors of Cilium
+// Copyright 2016-2020 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,14 +17,11 @@ package metricsmap
 import (
 	"context"
 	"fmt"
-	"io"
-	"io/ioutil"
-	"os"
 	"strconv"
-	"strings"
 	"unsafe"
 
 	"github.com/cilium/cilium/pkg/bpf"
+	"github.com/cilium/cilium/pkg/common"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/metrics"
@@ -45,23 +42,25 @@ const (
 	MapName = "cilium_metrics"
 	// MaxEntries is the maximum number of keys that can be present in the
 	// Metrics Map.
-	MaxEntries = 65536
+	//
+	// Currently max. 2 bits of the Key.Dir member are used (unknown,
+	// ingress or egress). Thus we can reduce from the theoretical max. size
+	// of 2**16 (2 uint8) to 2**10 (1 uint8 + 2 bits).
+	MaxEntries = 1024
 	// dirIngress and dirEgress values should match with
 	// METRIC_INGRESS and METRIC_EGRESS in bpf/lib/common.h
 	dirIngress = 1
 	dirEgress  = 2
 	dirUnknown = 0
-
-	possibleCPUSysfsPath = "/sys/devices/system/cpu/possible"
 )
 
 // direction is the metrics direction i.e ingress (to an endpoint)
 // or egress (from an endpoint). If it's none of the above, we return
 // UNKNOWN direction.
 var direction = map[uint8]string{
-	0: "UNKNOWN",
-	1: "INGRESS",
-	2: "EGRESS",
+	dirUnknown: "UNKNOWN",
+	dirIngress: "INGRESS",
+	dirEgress:  "EGRESS",
 }
 
 type pad3uint16 [3]uint16
@@ -194,7 +193,7 @@ func updateMetric(getCounter func() (prometheus.Counter, error), newValue float6
 
 	oldValue := metrics.GetCounterValue(counter)
 	if newValue > oldValue {
-		counter.Add((newValue - oldValue))
+		counter.Add(newValue - oldValue)
 	}
 }
 
@@ -262,53 +261,8 @@ func SyncMetricsMap(ctx context.Context) error {
 	return nil
 }
 
-// getNumPossibleCPUs returns a total number of possible CPUS, i.e. CPUs that
-// have been allocated resources and can be brought online if they are present.
-// The number is retrieved by parsing /sys/device/system/cpu/possible.
-//
-// See https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/include/linux/cpumask.h?h=v4.19#n50
-// for more details.
-func getNumPossibleCPUs() int {
-	f, err := os.Open(possibleCPUSysfsPath)
-	if err != nil {
-		log.WithError(err).Errorf("unable to open %q", possibleCPUSysfsPath)
-	}
-	defer f.Close()
-
-	return getNumPossibleCPUsFromReader(f)
-}
-
-func getNumPossibleCPUsFromReader(r io.Reader) int {
-	out, err := ioutil.ReadAll(r)
-	if err != nil {
-		log.WithError(err).Errorf("unable to read %q to get CPU count", possibleCPUSysfsPath)
-		return 0
-	}
-
-	var start, end int
-	count := 0
-	for _, s := range strings.Split(string(out), ",") {
-		// Go's scanf will return an error if a format cannot be fully matched.
-		// So, just ignore it, as a partial match (e.g. when there is only one
-		// CPU) is expected.
-		n, err := fmt.Sscanf(s, "%d-%d", &start, &end)
-
-		switch n {
-		case 0:
-			log.WithError(err).Errorf("failed to scan %q to retrieve number of possible CPUs!", s)
-			return 0
-		case 1:
-			count++
-		default:
-			count += (end - start + 1)
-		}
-	}
-
-	return count
-}
-
 func init() {
-	possibleCpus = getNumPossibleCPUs()
+	possibleCpus = common.GetNumPossibleCPUs(log)
 
 	vs := make(Values, possibleCpus)
 

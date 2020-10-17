@@ -31,7 +31,6 @@ import (
 	"github.com/cilium/cilium/pkg/logging/logfields"
 
 	"github.com/go-openapi/loads"
-	"github.com/jessevdk/go-flags"
 )
 
 var (
@@ -296,7 +295,7 @@ func (s *Server) Shutdown() {
 // newServer instantiates a new instance of the health API server on the
 // defaults unix socket.
 func (s *Server) newServer(spec *loads.Document) *healthApi.Server {
-	api := restapi.NewCiliumHealthAPI(spec)
+	api := restapi.NewCiliumHealthAPIAPI(spec)
 	api.Logger = log.Printf
 
 	// Admin API
@@ -306,7 +305,7 @@ func (s *Server) newServer(spec *loads.Document) *healthApi.Server {
 
 	srv := healthApi.NewServer(api)
 	srv.EnabledListeners = []string{"unix"}
-	srv.SocketPath = flags.Filename(defaults.SockPath)
+	srv.SocketPath = defaults.SockPath
 
 	srv.ConfigureAPI()
 

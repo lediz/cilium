@@ -1,4 +1,4 @@
-// Copyright 2018-2019 Authors of Cilium
+// Copyright 2018-2020 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,24 +17,18 @@ package main
 import (
 	"time"
 
+	operatorOption "github.com/cilium/cilium/operator/option"
 	"github.com/cilium/cilium/pkg/allocator"
 	"github.com/cilium/cilium/pkg/identity/cache"
+	"github.com/cilium/cilium/pkg/kvstore"
 	kvstoreallocator "github.com/cilium/cilium/pkg/kvstore/allocator"
-)
 
-var (
-	// identityGCInterval is the interval in which allocator identities are
-	// attempted to be expired from the kvstore
-	identityGCInterval time.Duration
-
-	// identityAllocationMode specifies what mode to use for identity
-	// allocation
-	identityAllocationMode string
+	"github.com/sirupsen/logrus"
 )
 
 func startKvstoreIdentityGC() {
-	log.Infof("Starting kvstore identity garbage collector with %s interval...", identityGCInterval)
-	backend, err := kvstoreallocator.NewKVStoreBackend(cache.IdentitiesPath, "", nil)
+	log.Infof("Starting kvstore identity garbage collector with %s interval...", operatorOption.Config.IdentityGCInterval)
+	backend, err := kvstoreallocator.NewKVStoreBackend(cache.IdentitiesPath, "", nil, kvstore.Client())
 	if err != nil {
 		log.WithError(err).Fatal("Unable to initialize kvstore backend for identity allocation")
 	}
@@ -43,14 +37,16 @@ func startKvstoreIdentityGC() {
 	keysToDelete := map[string]uint64{}
 	go func() {
 		for {
-			keysToDelete2, err := a.RunGC(keysToDelete)
+			keysToDelete2, err := a.RunGC(identityRateLimiter, keysToDelete)
 			if err != nil {
 				log.WithError(err).Warning("Unable to run security identity garbage collector")
 			} else {
 				keysToDelete = keysToDelete2
 			}
-
-			<-time.After(identityGCInterval)
+			<-time.After(operatorOption.Config.IdentityGCInterval)
+			log.WithFields(logrus.Fields{
+				"identities-to-delete": keysToDelete,
+			}).Debug("Will delete identities if they are still unused")
 		}
 	}()
 }

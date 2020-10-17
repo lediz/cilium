@@ -1,4 +1,4 @@
-// Copyright 2016-2019 Authors of Cilium
+// Copyright 2016-2020 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,7 +15,6 @@
 package watchers
 
 import (
-	"context"
 	"sync"
 
 	"github.com/cilium/cilium/pkg/k8s"
@@ -23,16 +22,14 @@ import (
 	"github.com/cilium/cilium/pkg/k8s/informer"
 	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/lock"
-	"github.com/cilium/cilium/pkg/node"
-	"github.com/cilium/cilium/pkg/serializer"
+	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/client-go/tools/cache"
 )
 
-func (k *K8sWatcher) ciliumNodeInit(ciliumNPClient *k8s.K8sCiliumClient, serNodes *serializer.FunctionQueue, asyncControllers *sync.WaitGroup) {
-
+func (k *K8sWatcher) ciliumNodeInit(ciliumNPClient *k8s.K8sCiliumClient, asyncControllers *sync.WaitGroup) {
 	// CiliumNode objects are used for node discovery until the key-value
 	// store is connected
 	var once sync.Once
@@ -40,71 +37,52 @@ func (k *K8sWatcher) ciliumNodeInit(ciliumNPClient *k8s.K8sCiliumClient, serNode
 		swgNodes := lock.NewStoppableWaitGroup()
 		_, ciliumNodeInformer := informer.NewInformer(
 			cache.NewListWatchFromClient(ciliumNPClient.CiliumV2().RESTClient(),
-				"ciliumnodes", v1.NamespaceAll, fields.Everything()),
+				cilium_v2.CNPluralName, v1.NamespaceAll, fields.Everything()),
 			&cilium_v2.CiliumNode{},
 			0,
 			cache.ResourceEventHandlerFuncs{
 				AddFunc: func(obj interface{}) {
 					var valid, equal bool
 					defer func() { k.K8sEventReceived(metricCiliumNode, metricCreate, valid, equal) }()
-					if ciliumNode, ok := obj.(*cilium_v2.CiliumNode); ok {
+					if ciliumNode := k8s.ObjToCiliumNode(obj); ciliumNode != nil {
 						valid = true
-						n := node.ParseCiliumNode(ciliumNode)
+						n := nodeTypes.ParseCiliumNode(ciliumNode)
 						if n.IsLocal() {
 							return
 						}
-						swgNodes.Add()
-						serNodes.Enqueue(func() error {
-							defer swgNodes.Done()
-							k.nodeDiscoverManager.NodeUpdated(n)
-							k.K8sEventProcessed(metricCiliumNode, metricCreate, true)
-							return nil
-						}, serializer.NoRetry)
+						k.nodeDiscoverManager.NodeUpdated(n)
+						k.K8sEventProcessed(metricCiliumNode, metricCreate, true)
 					}
 				},
 				UpdateFunc: func(oldObj, newObj interface{}) {
 					var valid, equal bool
 					defer func() { k.K8sEventReceived(metricCiliumNode, metricUpdate, valid, equal) }()
-					if ciliumNode, ok := newObj.(*cilium_v2.CiliumNode); ok {
-						valid = true
-						n := node.ParseCiliumNode(ciliumNode)
-						if n.IsLocal() {
-							return
-						}
-						swgNodes.Add()
-						serNodes.Enqueue(func() error {
-							defer swgNodes.Done()
+					if oldCN := k8s.ObjToCiliumNode(oldObj); oldCN != nil {
+						if ciliumNode := k8s.ObjToCiliumNode(newObj); ciliumNode != nil {
+							valid = true
+							if oldCN.DeepEqual(ciliumNode) {
+								equal = true
+								return
+							}
+							n := nodeTypes.ParseCiliumNode(ciliumNode)
+							if n.IsLocal() {
+								return
+							}
 							k.nodeDiscoverManager.NodeUpdated(n)
 							k.K8sEventProcessed(metricCiliumNode, metricUpdate, true)
-							return nil
-						}, serializer.NoRetry)
+						}
 					}
 				},
 				DeleteFunc: func(obj interface{}) {
 					var valid, equal bool
 					defer func() { k.K8sEventReceived(metricCiliumNode, metricDelete, valid, equal) }()
-					ciliumNode := k8s.CopyObjToCiliumNode(obj)
+					ciliumNode := k8s.ObjToCiliumNode(obj)
 					if ciliumNode == nil {
-						deletedObj, ok := obj.(cache.DeletedFinalStateUnknown)
-						if !ok {
-							return
-						}
-						// Delete was not observed by the watcher but is
-						// removed from kube-apiserver. This is the last
-						// known state and the object no longer exists.
-						ciliumNode = k8s.CopyObjToCiliumNode(deletedObj.Obj)
-						if ciliumNode == nil {
-							return
-						}
+						return
 					}
 					valid = true
-					n := node.ParseCiliumNode(ciliumNode)
-					swgNodes.Add()
-					serNodes.Enqueue(func() error {
-						defer swgNodes.Done()
-						k.nodeDiscoverManager.NodeDeleted(n)
-						return nil
-					}, serializer.NoRetry)
+					n := nodeTypes.ParseCiliumNode(ciliumNode)
+					k.nodeDiscoverManager.NodeDeleted(n)
 				},
 			},
 			k8s.ConvertToCiliumNode,
@@ -112,7 +90,7 @@ func (k *K8sWatcher) ciliumNodeInit(ciliumNPClient *k8s.K8sCiliumClient, serNode
 		isConnected := make(chan struct{})
 		// once isConnected is closed, it will stop waiting on caches to be
 		// synchronized.
-		k.blockWaitGroupToSyncResources(isConnected, swgNodes, ciliumNodeInformer, k8sAPIGroupCiliumNodeV2)
+		k.blockWaitGroupToSyncResources(isConnected, swgNodes, ciliumNodeInformer.HasSynced, k8sAPIGroupCiliumNodeV2)
 
 		once.Do(func() {
 			// Signalize that we have put node controller in the wait group
@@ -122,7 +100,7 @@ func (k *K8sWatcher) ciliumNodeInit(ciliumNPClient *k8s.K8sCiliumClient, serNode
 		k.k8sAPIGroups.addAPI(k8sAPIGroupCiliumNodeV2)
 		go ciliumNodeInformer.Run(isConnected)
 
-		<-kvstore.Client().Connected(context.TODO())
+		<-kvstore.Connected()
 		close(isConnected)
 
 		log.Info("Connected to key-value store, stopping CiliumNode watcher")

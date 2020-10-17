@@ -17,6 +17,7 @@ package k8sTest
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"time"
 
 	. "github.com/cilium/cilium/test/ginkgo-ext"
@@ -25,45 +26,44 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-// This tests the Istio 1.4.3 integration, following the configuration
+// This tests the Istio integration, following the configuration
 // instructions specified in the Istio Getting Started Guide in
 // Documentation/gettingstarted/istio.rst.
-// Changes to the Getting Started Guide may require re-generating or copying
-// the following manifests:
-// - istio-crds.yaml
-// - istio-cilium.yaml
-// - bookinfo-v1-istio.yaml
-// - bookinfo-v2-istio.yaml
-// Cf. the comments below for each manifest.
-var _ = Describe("K8sIstioTest", func() {
+var _ = SkipContextIf(func() bool {
+	return helpers.SkipQuarantined() && helpers.GetCurrentK8SEnv() == "1.19"
+}, "K8sIstioTest", func() {
 
 	var (
 		// istioSystemNamespace is the default namespace into which Istio is
 		// installed.
 		istioSystemNamespace = "istio-system"
 
-		// istioCRDYAMLPath is the file generated from istio-init during a
-		// step in Documentation/gettingstarted/istio.rst to setup
-		// Istio 1.4.3. In the GSG the file is directly piped to kubectl.
-		istioCRDYAMLPath = ""
+		istioVersion = "1.5.9"
 
-		// istioYAMLPath is the istio-cilium.yaml file generated following the
-		// instructions in Documentation/gettingstarted/istio.rst to setup
-		// Istio 1.4.3. mTLS is enabled.
-		istioYAMLPath = ""
+		// Modifiers for pre-release testing, normally empty
+		prerelease     = "" // "-beta.1"
+		istioctlParams = ""
+		// Keeping these here in comments serve multiple purposes:
+		// - remind how to test with prerelease images in future
+		// - cause CI infra to prepull these images so that they do not
+		//   need to be pulled on demand during the test
+		// " --set values.pilot.image=docker.io/cilium/istio_pilot:1.5.9" +
+		// " --set values.proxy.image=docker.io/cilium/istio_proxy:1.5.9" +
+		// " --set values.proxy_init.image=docker.io/cilium/istio_proxy:1.5.9"
+		ciliumOptions = map[string]string{
+			// "proxy.sidecarImageRegex": "jrajahalme/istio_proxy",
+		}
 
-		// istioServiceNames is the subset of Istio services in the Istio
-		// namespace that are accessed from sidecar proxies.
+		// Map of tested runtimes for cilium-istioctl
+		ciliumIstioctlOSes = map[string]string{
+			"darwin": "osx",
+			"linux":  "linux",
+		}
+
+		// istioServiceNames is the set of Istio services needed for the tests
 		istioServiceNames = []string{
-			// All the services created by Istio are listed here, but only
-			// those that we care about are uncommented.
-			// "istio-citadel",
-			// "istio-galley",
 			"istio-ingressgateway",
 			"istio-pilot",
-			// "istio-policy",
-			// "istio-telemetry",
-			// "prometheus",
 		}
 
 		// wgetCommand is the command used in this test because the Istio apps
@@ -82,50 +82,50 @@ var _ = Describe("K8sIstioTest", func() {
 		k8sVersion := helpers.GetCurrentK8SEnv()
 		switch k8sVersion {
 		case "1.7", "1.8", "1.9", "1.10", "1.11", "1.12", "1.13":
-			Skip(fmt.Sprintf("Istio 1.4.3 doesn't support K8S %s", k8sVersion))
+			Skip(fmt.Sprintf("Istio %s doesn't support K8S %s", istioVersion, k8sVersion))
 		}
 
 		kubectl = helpers.CreateKubectl(helpers.K8s1VMName(), logger)
 
-		istioCRDYAMLPath = helpers.ManifestGet(kubectl.BasePath(), "istio-crds.yaml")
-		istioYAMLPath = helpers.ManifestGet(kubectl.BasePath(), "istio-cilium.yaml")
+		By("Downloading cilium-istioctl")
+		os := "linux"
+		if kubectl.IsLocal() {
+			// Use Ginkgo runtime OS instead when commands are executed in the local Ginkgo host
+			os = ciliumIstioctlOSes[runtime.GOOS]
+		}
+		ciliumIstioctlURL := "https://github.com/cilium/istio/releases/download/" + istioVersion + prerelease + "/cilium-istioctl-" + istioVersion + "-" + os + ".tar.gz"
+		res := kubectl.Exec(helpers.CurlWithRetries(fmt.Sprintf("curl -L %s | tar xz", ciliumIstioctlURL), 5, false))
+		res.ExpectSuccess("unable to download %s", ciliumIstioctlURL)
+		res = kubectl.ExecShort("./cilium-istioctl version")
+		res.ExpectSuccess("unable to execute cilium-istioctl")
 
 		ciliumFilename = helpers.TimestampFilename("cilium.yaml")
-		DeployCiliumAndDNS(kubectl, ciliumFilename)
+		DeployCiliumOptionsAndDNS(kubectl, ciliumFilename, ciliumOptions)
 
-		By("Creating the istio-system namespace")
-		res := kubectl.NamespaceCreate(istioSystemNamespace)
-		res.ExpectSuccess("unable to create namespace %q", istioSystemNamespace)
+		By("Labeling default namespace for sidecar injection")
+		res = kubectl.NamespaceLabel(helpers.DefaultNamespace, "istio-injection=enabled")
+		res.ExpectSuccess("unable to label namespace %q", helpers.DefaultNamespace)
 
-		By("Creating the Istio CRDs")
-
-		res = kubectl.ApplyDefault(istioCRDYAMLPath)
-		res.ExpectSuccess("unable to create Istio CRDs")
-
-		By("Waiting for Istio CRDs to be ready")
-		err := kubectl.WaitForCRDCount("istio.io|certmanager.k8s.io", 23, helpers.HelperTimeout)
-		Expect(err).To(BeNil(),
-			"Istio CRDs are not ready after timeout")
-
-		By("Creating the Istio system PODs")
-
-		res = kubectl.ApplyDefault(istioYAMLPath)
-		res.ExpectSuccess("unable to create Istio resources")
+		By("Deploying Istio")
+		res = kubectl.Exec("./cilium-istioctl manifest apply -y" + istioctlParams)
+		res.ExpectSuccess("unable to deploy Istio")
 	})
 
 	AfterAll(func() {
-		By("Deleting the Istio resources")
-		_ = kubectl.Delete(istioYAMLPath)
+		By("Deleting default namespace sidecar injection label")
+		_ = kubectl.NamespaceLabel(helpers.DefaultNamespace, "istio-injection-")
 
-		By("Deleting the Istio CRDs")
-		_ = kubectl.Delete(istioCRDYAMLPath)
+		By("Deleting the Istio resources")
+		_ = kubectl.Exec(fmt.Sprintf("./cilium-istioctl manifest generate | %s delete -f -", helpers.KubectlCmd))
+
+		By("Waiting all terminating PODs to disappear")
+		err := kubectl.WaitCleanAllTerminatingPods(teardownTimeout)
+		ExpectWithOffset(1, err).To(BeNil(), "terminating Istio PODs are not deleted after timeout")
 
 		By("Deleting the istio-system namespace")
 		_ = kubectl.NamespaceDelete(istioSystemNamespace)
 
-		kubectl.DeleteCiliumDS()
-		kubectl.WaitCleanAllTerminatingPods(teardownTimeout)
-
+		UninstallCiliumFromManifest(kubectl, ciliumFilename)
 		kubectl.CloseSSHClient()
 	})
 
@@ -142,9 +142,7 @@ var _ = Describe("K8sIstioTest", func() {
 	})
 
 	AfterFailed(func() {
-		kubectl.CiliumReport(helpers.CiliumNamespace,
-			"cilium endpoint list",
-			"cilium bpf proxy list")
+		kubectl.CiliumReport("cilium endpoint list")
 	})
 
 	// This is defined as a separate function to be called from the test below
@@ -182,7 +180,7 @@ var _ = Describe("K8sIstioTest", func() {
 
 	// This is a subset of Services's "Bookinfo Demo" test suite, with the pods
 	// injected with Istio sidecar proxies and Istio mTLS enabled.
-	Context("Istio Bookinfo Demo", func() {
+	SkipContextIf(func() bool { return ciliumIstioctlOSes[runtime.GOOS] == "" }, "Istio Bookinfo Demo", func() {
 
 		var (
 			resourceYAMLPaths []string
@@ -204,10 +202,10 @@ var _ = Describe("K8sIstioTest", func() {
 		})
 
 		// shouldConnect checks that srcPod can connect to dstURI.
-		shouldConnect := func(srcPod, dstURI string) bool {
+		shouldConnect := func(srcPod, srcContainer, dstURI string) bool {
 			By("Checking that %q can connect to %q", srcPod, dstURI)
-			res := kubectl.ExecPodCmd(
-				helpers.DefaultNamespace, srcPod, fmt.Sprintf("%s %s", wgetCommand, dstURI))
+			res := kubectl.ExecPodContainerCmd(
+				helpers.DefaultNamespace, srcPod, srcContainer, fmt.Sprintf("%s %s", wgetCommand, dstURI))
 			if !res.WasSuccessful() {
 				GinkgoPrint("Unable to connect from %q to %q: %s", srcPod, dstURI, res.OutputPrettyPrint())
 				return false
@@ -216,10 +214,10 @@ var _ = Describe("K8sIstioTest", func() {
 		}
 
 		// shouldNotConnect checks that srcPod cannot connect to dstURI.
-		shouldNotConnect := func(srcPod, dstURI string) bool {
+		shouldNotConnect := func(srcPod, srcContainer, dstURI string) bool {
 			By("Checking that %q cannot connect to %q", srcPod, dstURI)
-			res := kubectl.ExecPodCmd(
-				helpers.DefaultNamespace, srcPod, fmt.Sprintf("%s %s", wgetCommand, dstURI))
+			res := kubectl.ExecPodContainerCmd(
+				helpers.DefaultNamespace, srcPod, srcContainer, fmt.Sprintf("%s %s", wgetCommand, dstURI))
 			if res.WasSuccessful() {
 				GinkgoPrint("Was able to connect from %q to %q, but expected no connection: %s", srcPod, dstURI, res.OutputPrettyPrint())
 				return false
@@ -270,13 +268,8 @@ var _ = Describe("K8sIstioTest", func() {
 			apiPort := "9080"
 			podNameFilter := "{.items[*].metadata.name}"
 
-			// Those YAML files are the bookinfo-v1.yaml and bookinfo-v2.yaml
-			// manifests injected with Istio sidecars using those commands:
-			// cd test/k8sT/manifests/
-			// istioctl kube-inject -f bookinfo-v1.yaml > bookinfo-v1-istio.yaml
-			// istioctl kube-inject -f bookinfo-v2.yaml > bookinfo-v2-istio.yaml
-			bookinfoV1YAML := helpers.ManifestGet(kubectl.BasePath(), "bookinfo-v1-istio.yaml")
-			bookinfoV2YAML := helpers.ManifestGet(kubectl.BasePath(), "bookinfo-v2-istio.yaml")
+			bookinfoV1YAML := helpers.ManifestGet(kubectl.BasePath(), "bookinfo-v1.yaml")
+			bookinfoV2YAML := helpers.ManifestGet(kubectl.BasePath(), "bookinfo-v2.yaml")
 			l7PolicyPath := helpers.ManifestGet(kubectl.BasePath(), "cnp-specs.yaml")
 
 			waitIstioReady()
@@ -337,13 +330,13 @@ var _ = Describe("K8sIstioTest", func() {
 			err = helpers.WithTimeout(func() bool {
 				allGood := true
 
-				allGood = shouldConnect(reviewsPodV1.String(), formatAPI(ratings, apiPort, health)) && allGood
-				allGood = shouldNotConnect(reviewsPodV1.String(), formatAPI(ratings, apiPort, ratingsPath)) && allGood
+				allGood = shouldConnect(reviewsPodV1.String(), "reviews", formatAPI(ratings, apiPort, health)) && allGood
+				allGood = shouldNotConnect(reviewsPodV1.String(), "reviews", formatAPI(ratings, apiPort, ratingsPath)) && allGood
 
-				allGood = shouldConnect(productpagePodV1.String(), formatAPI(details, apiPort, health)) && allGood
+				allGood = shouldConnect(productpagePodV1.String(), "productpage", formatAPI(details, apiPort, health)) && allGood
 
-				allGood = shouldNotConnect(productpagePodV1.String(), formatAPI(ratings, apiPort, health)) && allGood
-				allGood = shouldNotConnect(productpagePodV1.String(), formatAPI(ratings, apiPort, ratingsPath)) && allGood
+				allGood = shouldNotConnect(productpagePodV1.String(), "productpage", formatAPI(ratings, apiPort, health)) && allGood
+				allGood = shouldNotConnect(productpagePodV1.String(), "productpage", formatAPI(ratings, apiPort, ratingsPath)) && allGood
 
 				return allGood
 			}, "Istio sidecar proxies are not configured", &helpers.TimeoutConfig{Timeout: helpers.HelperTimeout})

@@ -88,11 +88,13 @@ func (rule *r2d2Rule) Matches(data interface{}) bool {
 // May panic
 func ruleParser(rule *cilium.PortNetworkPolicyRule) []proxylib.L7NetworkPolicyRule {
 	l7Rules := rule.GetL7Rules()
-	var rules []proxylib.L7NetworkPolicyRule
 	if l7Rules == nil {
-		return rules
+		return nil
 	}
-	for _, l7Rule := range l7Rules.GetL7Rules() {
+
+	allowRules := l7Rules.GetL7AllowRules()
+	rules := make([]proxylib.L7NetworkPolicyRule, 0, len(allowRules))
+	for _, l7Rule := range allowRules {
 		var rr r2d2Rule
 		for k, v := range l7Rule.Rule {
 			switch k {
@@ -139,7 +141,7 @@ type parser struct {
 	inserted   bool
 }
 
-func (f *factory) Create(connection *proxylib.Connection) proxylib.Parser {
+func (f *factory) Create(connection *proxylib.Connection) interface{} {
 	log.Debugf("R2d2ParserFactory: Create: %v", connection)
 
 	return &parser{connection: connection}

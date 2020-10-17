@@ -1,4 +1,4 @@
-// Copyright 2016-2019 Authors of Cilium
+// Copyright 2016-2020 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ import (
 	"context"
 
 	"github.com/cilium/cilium/pkg/datapath"
+	"github.com/cilium/cilium/pkg/fqdn/restore"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/lock"
 	monitorAPI "github.com/cilium/cilium/pkg/monitor/api"
@@ -37,11 +38,23 @@ type Owner interface {
 	// of BPF programs.
 	GetCompilationLock() *lock.RWMutex
 
+	// GetCIDRPrefixLengths returns the sorted list of unique prefix lengths used
+	// by CIDR policies.
+	GetCIDRPrefixLengths() (s6, s4 []int)
+
 	// SendNotification is called to emit an agent notification
-	SendNotification(typ monitorAPI.AgentNotification, text string) error
+	SendNotification(msg monitorAPI.AgentNotifyMessage) error
 
 	// Datapath returns a reference to the datapath implementation.
 	Datapath() datapath.Datapath
+
+	// GetDNSRules creates a fresh copy of DNS rules that can be used when
+	// endpoint is restored on a restart.
+	GetDNSRules(epID uint16) restore.DNSRules
+
+	// RemoveRestoredDNSRules removes any restored DNS rules for
+	// this endpoint from the DNS proxy.
+	RemoveRestoredDNSRules(epID uint16)
 }
 
 // EndpointInfoSource returns information about an endpoint being proxied.
@@ -56,9 +69,6 @@ type EndpointInfoSource interface {
 	HasSidecarProxy() bool
 	ConntrackName() string
 	ConntrackNameLocked() string
-	GetIngressPolicyEnabledLocked() bool
-	GetEgressPolicyEnabledLocked() bool
-	ProxyID(l4 *policy.L4Filter) string
 	GetProxyInfoByFields() (uint64, string, string, []string, string, uint64, error)
 }
 

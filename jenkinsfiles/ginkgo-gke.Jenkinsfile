@@ -1,26 +1,56 @@
+// This jenkinsfile sets tag based on git commit hash. Built docker image is tagged accordingly and pushed to local docker registry (living on the node)
+// This allows multiple jobs to use the same registry.
+
 @Library('cilium') _
 
 pipeline {
     agent {
-        label 'baremetal'
+        label 'gke'
     }
 
     environment {
         PROJ_PATH = "src/github.com/cilium/cilium"
-        GINKGO_TIMEOUT="108m"
+        GINKGO_TIMEOUT="180m"
         TESTDIR="${WORKSPACE}/${PROJ_PATH}/test"
         GOPATH="${WORKSPACE}"
         GKE_KEY=credentials('gke-key')
-        GKE_ZONE="us-west1-a"
+        TAG="${GIT_COMMIT}"
+        HOME="${WORKSPACE}"
+        RUN_QUARANTINED="""${sh(
+                returnStdout: true,
+                script: 'if [ "${RunQuarantined}" = "" ]; then echo -n "false"; else echo -n "${RunQuarantined}"; fi'
+            )}"""
+        RACE="""${sh(
+                returnStdout: true,
+                script: 'if [ "${run_with_race_detection}" = "" ]; then echo -n ""; else echo -n "1"; fi'
+            )}"""
+        LOCKDEBUG="""${sh(
+                returnStdout: true,
+                script: 'if [ "${run_with_race_detection}" = "" ]; then echo -n ""; else echo -n "1"; fi'
+            )}"""
+        BASE_IMAGE="""${sh(
+                returnStdout: true,
+                script: 'if [ "${run_with_race_detection}" = "" ]; then echo -n "scratch"; else echo -n "quay.io/cilium/cilium-runtime:2020-10-15@sha256:ad319958e21a243f931ac38f2eac8af73b9464ea8c58ecde2ec741a22d45a81e"; fi'
+            )}"""
     }
 
     options {
-        timeout(time: 260, unit: 'MINUTES')
+        timeout(time: 300, unit: 'MINUTES')
         timestamps()
         ansiColor('xterm')
     }
 
     stages {
+        stage('Set build name') {
+            when {
+                not {environment name: 'GIT_BRANCH', value: 'origin/master'}
+            }
+            steps {
+                   script {
+                       currentBuild.displayName = env.getProperty('ghprbPullTitle') + '  ' + env.getProperty('ghprbPullLink') + '  ' + currentBuild.displayName
+                   }
+            }
+        }
         stage('Checkout') {
             options {
                 timeout(time: 20, unit: 'MINUTES')
@@ -31,7 +61,11 @@ pipeline {
                 checkout scm
                 sh 'mkdir -p ${PROJ_PATH}'
                 sh 'ls -A | grep -v src | xargs mv -t ${PROJ_PATH}'
-                sh '/usr/local/bin/cleanup || true'
+            }
+        }
+        stage('Start docker registry for build') {
+            steps{
+                sh 'cd ${TESTDIR}/gke; ./start-registry.sh'
             }
         }
         stage('Precheck') {
@@ -60,6 +94,7 @@ pipeline {
                 dir("/tmp") {
                     withCredentials([file(credentialsId: 'gke-key', variable: 'KEY_PATH')]) {
                         sh 'gcloud auth activate-service-account --key-file ${KEY_PATH}'
+                        sh 'gcloud config set project cilium-ci'
                     }
                 }
             }
@@ -67,11 +102,8 @@ pipeline {
         stage('Make Cilium images and prepare gke cluster') {
             parallel {
                 stage('Make Cilium images') {
-                    environment {
-                        TESTDIR="${WORKSPACE}/${PROJ_PATH}/test"
-                    }
                     steps {
-                        sh 'cd ${TESTDIR}; ./make-images-push-to-local-registry.sh $(./print-node-ip.sh) latest'
+                        sh 'cd ${TESTDIR}; ./make-images-push-to-local-registry.sh $(gke/registry-ip.sh) ${TAG} "--no-cache"'
                     }
                     post {
                         unsuccessful {
@@ -92,7 +124,14 @@ pipeline {
                     }
                     steps {
                         dir("${TESTDIR}/gke") {
-                            sh './select-cluster.sh'
+                            retry(3){
+                                sh './release-cluster.sh || true'
+                                sh './select-cluster.sh'
+                            }
+                            script {
+                                def name = readFile file: 'cluster-name'
+                                currentBuild.displayName = currentBuild.displayName + " running on " + name
+                            }
                         }
                     }
                     post {
@@ -116,16 +155,49 @@ pipeline {
                 CONTAINER_RUNTIME=setIfLabel("area/containerd", "containerd", "docker")
                 KUBECONFIG="${TESTDIR}/gke/gke-kubeconfig"
                 CNI_INTEGRATION="gke"
+                CILIUM_IMAGE = """${sh(
+                        returnStdout: true,
+                        script: 'echo -n $(${TESTDIR}/gke/registry-ip.sh)/cilium/cilium'
+                        )}"""
+                CILIUM_TAG = """${sh(
+                        returnStdout: true,
+                        script: 'echo -n ${TAG}'
+                        )}"""
+                CILIUM_OPERATOR_IMAGE= """${sh(
+                        returnStdout: true,
+                        script: 'echo -n $(${TESTDIR}/gke/registry-ip.sh)/cilium/operator'
+                        )}"""
+                CILIUM_OPERATOR_TAG = """${sh(
+                        returnStdout: true,
+                        script: 'echo -n ${TAG}'
+                        )}"""
+                HUBBLE_RELAY_IMAGE= """${sh(
+                        returnStdout: true,
+                        script: 'echo -n $(${TESTDIR}/gke/registry-ip.sh)/cilium/hubble-relay'
+                        )}"""
+                HUBBLE_RELAY_TAG = """${sh(
+                        returnStdout: true,
+                        script: 'echo -n ${TAG}'
+                        )}"""
+                K8S_VERSION= """${sh(
+                        returnStdout: true,
+                        script: 'cat ${TESTDIR}/gke/cluster-version'
+                        )}"""
+                FOCUS= """${sh(
+                        returnStdout: true,
+                        script: 'echo ${ghprbCommentBody} | sed -r "s/([^ ]* |^[^ ]*$)//" | sed "s/^$/K8s*/" | tr -d \'\n\''
+                        )}"""
             }
             steps {
                 dir("${TESTDIR}"){
-                    sh 'K8S_VERSION=$(${TESTDIR}/gke/get-cluster-version.sh) CILIUM_IMAGE=$(./print-node-ip.sh)/cilium/cilium:latest CILIUM_OPERATOR_IMAGE=$(./print-node-ip.sh)/cilium/operator:latest ginkgo --focus="$(echo ${ghprbCommentBody} | sed -r "s/([^ ]* |^[^ ]*$)//" | sed "s/^$/K8s*/")" -v --failFast=${FAILFAST} -- -cilium.provision=false -cilium.timeout=${GINKGO_TIMEOUT} -cilium.kubeconfig=${TESTDIR}/gke/gke-kubeconfig -cilium.passCLIEnvironment=true -cilium.registry=$(./print-node-ip.sh)'
+                    sh 'env'
+                    sh 'ginkgo --focus="${FOCUS}" -v -- -cilium.provision=false -cilium.timeout=${GINKGO_TIMEOUT} -cilium.kubeconfig=${KUBECONFIG} -cilium.passCLIEnvironment=true -cilium.image=${CILIUM_IMAGE} -cilium.tag=${CILIUM_TAG} -cilium.operator-image=${CILIUM_OPERATOR_IMAGE} -cilium.operator-tag=${CILIUM_OPERATOR_TAG} -cilium.hubble-relay-image=${HUBBLE_RELAY_IMAGE} -cilium.hubble-relay-tag=${HUBBLE_RELAY_TAG} -cilium.holdEnvironment=false -cilium.runQuarantined=${RUN_QUARANTINED}'
                 }
             }
             post {
                 always {
                     sh 'cd ${TESTDIR}; ./archive_test_results_eks.sh || true'
-                    archiveArtifacts artifacts: 'src/github.com/cilium/cilium/*.zip'
+                    archiveArtifacts artifacts: '**/*.zip'
                     junit testDataPublishers: [[$class: 'AttachmentPublisher']], testResults: 'src/github.com/cilium/cilium/test/*.xml'
                 }
                 unsuccessful {
@@ -140,6 +212,7 @@ pipeline {
   }
     post {
         always {
+            sh 'cd ${TESTDIR}/gke; ./stop-registry.sh || true'
             sh 'cd ${TESTDIR}/gke; ./release-cluster.sh || true'
             cleanWs()
             sh '/usr/local/bin/cleanup || true'

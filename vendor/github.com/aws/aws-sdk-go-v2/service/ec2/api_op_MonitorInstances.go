@@ -61,7 +61,7 @@ const opMonitorInstances = "MonitorInstances"
 // Amazon Elastic Compute Cloud.
 //
 // Enables detailed monitoring for a running instance. Otherwise, basic monitoring
-// is enabled. For more information, see Monitoring Your Instances and Volumes
+// is enabled. For more information, see Monitoring your instances and volumes
 // (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/using-cloudwatch.html)
 // in the Amazon Elastic Compute Cloud User Guide.
 //
@@ -87,6 +87,7 @@ func (c *Client) MonitorInstancesRequest(input *MonitorInstancesInput) MonitorIn
 	}
 
 	req := c.newRequest(op, input, &MonitorInstancesOutput{})
+
 	return MonitorInstancesRequest{Request: req, Input: input, Copy: c.MonitorInstancesRequest}
 }
 

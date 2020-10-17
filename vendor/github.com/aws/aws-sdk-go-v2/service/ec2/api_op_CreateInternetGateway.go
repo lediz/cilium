@@ -17,6 +17,9 @@ type CreateInternetGatewayInput struct {
 	// the required permissions, the error response is DryRunOperation. Otherwise,
 	// it is UnauthorizedOperation.
 	DryRun *bool `locationName:"dryRun" type:"boolean"`
+
+	// The tags to assign to the internet gateway.
+	TagSpecifications []TagSpecification `locationName:"TagSpecification" locationNameList:"item" type:"list"`
 }
 
 // String returns the string representation
@@ -67,6 +70,7 @@ func (c *Client) CreateInternetGatewayRequest(input *CreateInternetGatewayInput)
 	}
 
 	req := c.newRequest(op, input, &CreateInternetGatewayOutput{})
+
 	return CreateInternetGatewayRequest{Request: req, Input: input, Copy: c.CreateInternetGatewayRequest}
 }
 

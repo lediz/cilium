@@ -45,6 +45,9 @@ type NatKey4 struct {
 	tuple.TupleKey4Global
 }
 
+// SizeofNatKey4 is the size of the NatKey4 type in bytes.
+const SizeofNatKey4 = int(unsafe.Sizeof(NatKey4{}))
+
 // NewValue creates a new bpf.MapValue.
 func (k *NatKey4) NewValue() bpf.MapValue { return &NatEntry4{} }
 
@@ -80,8 +83,11 @@ type NatKey6 struct {
 	tuple.TupleKey6Global
 }
 
+// SizeofNatKey6 is the size of the NatKey6 type in bytes.
+const SizeofNatKey6 = int(unsafe.Sizeof(NatKey6{}))
+
 // NewValue creates a new bpf.MapValue.
-func (k *NatKey6) NewValue() bpf.MapValue { return &NatEntry4{} }
+func (k *NatKey6) NewValue() bpf.MapValue { return &NatEntry6{} }
 
 // ToNetwork converts ports to network byte order.
 //

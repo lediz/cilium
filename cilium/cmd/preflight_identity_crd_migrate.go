@@ -1,4 +1,4 @@
-// Copyright 2019 Authors of Cilium
+// Copyright 2019-2020 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,7 +25,9 @@ import (
 	"github.com/cilium/cilium/pkg/identity/cache"
 	"github.com/cilium/cilium/pkg/idpool"
 	"github.com/cilium/cilium/pkg/k8s"
+	k8sconfig "github.com/cilium/cilium/pkg/k8s/config"
 	"github.com/cilium/cilium/pkg/k8s/identitybackend"
+	"github.com/cilium/cilium/pkg/kvstore"
 	kvstoreallocator "github.com/cilium/cilium/pkg/kvstore/allocator"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
@@ -102,7 +104,6 @@ func migrateIdentities() {
 	listCancel()
 
 	log.Info("Migrating identities to CRD")
-	badKeys := make([]allocator.AllocatorKey, 0)                       // keys that have real errors
 	alreadyAllocatedKeys := make(map[idpool.ID]allocator.AllocatorKey) // IDs that are already allocated, maybe with different labels
 
 	for id, key := range kvstoreIDs {
@@ -118,8 +119,7 @@ func migrateIdentities() {
 			alreadyAllocatedKeys[id] = key
 
 		case err != nil:
-			scopedLog.WithError(err).Error("Cannot allocate CRD ID. This key will be allocated with a new numeric identity")
-			badKeys = append(badKeys, key)
+			scopedLog.WithField(logfields.Key, key).WithError(err).Error("Cannot allocate CRD ID. This key will be allocated with a new numeric identity")
 
 		default:
 			scopedLog.Info("Migrated identity")
@@ -165,7 +165,7 @@ func migrateIdentities() {
 
 		ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
 		defer cancel()
-		newID, actuallyAllocated, err := crdAllocator.Allocate(ctx, key)
+		newID, actuallyAllocated, _, err := crdAllocator.Allocate(ctx, key)
 		switch {
 		case err != nil:
 			log.WithError(err).Errorf("Cannot allocate new CRD ID for %v", key)
@@ -193,8 +193,12 @@ func initK8s(ctx context.Context) (crdBackend allocator.Backend, crdAllocator *a
 
 	k8s.Configure(k8sAPIServer, k8sKubeConfigPath, float32(k8sClientQPSLimit), k8sClientBurst)
 
-	if err := k8s.Init(); err != nil {
+	if err := k8s.Init(k8sconfig.NewDefaultConfiguration()); err != nil {
 		log.WithError(err).Fatal("Unable to connect to Kubernetes apiserver")
+	}
+
+	if err := k8s.WaitForNodeInformation(); err != nil {
+		log.WithError(err).Fatal("Unable to connect to get node spec from apiserver")
 	}
 
 	// Update CRDs to ensure ciliumIdentity is present
@@ -239,7 +243,7 @@ func initKVStore(ctx context.Context) (kvstoreBackend allocator.Backend) {
 	setupKvstore(ctx)
 
 	idPath := path.Join(cache.IdentitiesPath, "id")
-	kvstoreBackend, err := kvstoreallocator.NewKVStoreBackend(cache.IdentitiesPath, idPath, cache.GlobalIdentity{})
+	kvstoreBackend, err := kvstoreallocator.NewKVStoreBackend(cache.IdentitiesPath, idPath, cache.GlobalIdentity{}, kvstore.Client())
 	if err != nil {
 		log.WithError(err).Fatal("Cannot create kvstore identity backend")
 	}

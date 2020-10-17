@@ -154,21 +154,13 @@ func (cm *CIDRMap) Close() error {
 	return bpf.ObjClose(cm.Fd)
 }
 
-// OpenMap opens a new CIDRMap. 'bool' returns 'true' if the map was
-// created, and 'false' if the map already existed. prefixdyn denotes
-// whether element's prefixlen can vary and we thus need to use a LPM
-// trie instead of hash table.
-func OpenMap(path string, prefixlen int, prefixdyn bool) (*CIDRMap, bool, error) {
-	return OpenMapElems(path, prefixlen, prefixdyn, MaxEntries)
-}
-
 // OpenMapElems is the same as OpenMap only with defined maxelem as argument.
 func OpenMapElems(path string, prefixlen int, prefixdyn bool, maxelem uint32) (*CIDRMap, bool, error) {
-	var typeMap = bpf.BPF_MAP_TYPE_LPM_TRIE
-	var prefix = 0
+	typeMap := bpf.MapTypeLPMTrie
+	prefix := 0
 
-	if prefixdyn == false {
-		typeMap = bpf.BPF_MAP_TYPE_HASH
+	if !prefixdyn {
+		typeMap = bpf.MapTypeHash
 		prefix = prefixlen
 	}
 	if prefixlen <= 0 {
@@ -186,7 +178,7 @@ func OpenMapElems(path string, prefixlen int, prefixdyn bool, maxelem uint32) (*
 
 	if err != nil {
 		log.Debug("Kernel does not support CIDR maps, using hash table instead.")
-		typeMap = bpf.BPF_MAP_TYPE_HASH
+		typeMap = bpf.MapTypeHash
 		fd, isNewMap, err = bpf.OpenOrCreateMap(
 			path,
 			typeMap,
@@ -213,7 +205,7 @@ func OpenMapElems(path string, prefixlen int, prefixdyn bool, maxelem uint32) (*
 	log.WithFields(logrus.Fields{
 		logfields.Path: path,
 		"fd":           fd,
-		"LPM":          typeMap == bpf.BPF_MAP_TYPE_LPM_TRIE,
+		"LPM":          typeMap == bpf.MapTypeLPMTrie,
 	}).Debug("Created CIDR map")
 
 	return m, isNewMap, nil

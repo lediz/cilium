@@ -26,7 +26,20 @@ type DescribePlacementGroupsInput struct {
 	//    | deleted).
 	//
 	//    * strategy - The strategy of the placement group (cluster | spread | partition).
+	//
+	//    * tag:<key> - The key/value combination of a tag assigned to the resource.
+	//    Use the tag key in the filter name and the tag value as the filter value.
+	//    For example, to find all resources that have a tag with the key Owner
+	//    and the value TeamA, specify tag:Owner for the filter name and TeamA for
+	//    the filter value.
+	//
+	//    * tag-key - The key of a tag assigned to the resource. Use this filter
+	//    to find all resources that have a tag with a specific key, regardless
+	//    of the tag value.
 	Filters []Filter `locationName:"Filter" locationNameList:"Filter" type:"list"`
+
+	// The IDs of the placement groups.
+	GroupIds []string `locationName:"GroupId" locationNameList:"GroupId" type:"list"`
 
 	// The names of the placement groups.
 	//
@@ -57,7 +70,7 @@ const opDescribePlacementGroups = "DescribePlacementGroups"
 // Amazon Elastic Compute Cloud.
 //
 // Describes the specified placement groups or all of your placement groups.
-// For more information, see Placement Groups (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/placement-groups.html)
+// For more information, see Placement groups (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/placement-groups.html)
 // in the Amazon Elastic Compute Cloud User Guide.
 //
 //    // Example sending a request using DescribePlacementGroupsRequest.
@@ -80,6 +93,7 @@ func (c *Client) DescribePlacementGroupsRequest(input *DescribePlacementGroupsIn
 	}
 
 	req := c.newRequest(op, input, &DescribePlacementGroupsOutput{})
+
 	return DescribePlacementGroupsRequest{Request: req, Input: input, Copy: c.DescribePlacementGroupsRequest}
 }
 
